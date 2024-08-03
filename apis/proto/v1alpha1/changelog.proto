@@ -1,0 +1,81 @@
+/*
+Copyright 2024 The Crossplane Authors.
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+    http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+syntax = "proto3";
+
+import "google/protobuf/struct.proto";
+
+// buf:lint:ignore PACKAGE_DIRECTORY_MATCH
+package changelog.proto.v1alpha1;
+
+option go_package = "github.com/crossplane/crossplane-runtime/apis/proto/v1alpha1";
+
+// ChangeLogService is a service that provides the ability to send change log
+// entries.
+service ChangeLogService {
+  // SendChangeLog sends a change log entry to the change log service.
+  rpc SendChangeLog (ChangeLogEntry) returns (ChangeLogResponse) {}
+}
+
+// ChangeLogEntry represents a single change log entry, with detailed
+// information about the resource that was changed.
+message ChangeLogEntry {
+  // The name and version of the provider that is making the change to the
+  // resource.
+  string provider = 1;
+
+  // The type of the resource that was changed, e.g. Group, Version, Kind.
+  string type = 2;
+
+  // The name of the resource that was changed.
+  string name = 3;
+
+  // The external name of the resource that was changed.
+  string externalName = 4;
+
+  // The type of operation that was performed on the resource, e.g. Create,
+  // Update, or Delete.
+  OperationType operation = 5;
+
+  // A full snapshot of the resource's state, as observed directly before the
+  // resource was changed.
+  google.protobuf.Struct snapshot = 6;
+
+  // An optional error message that describes any error encountered while
+  // performing the operation on the resource.
+  optional string errorMessage = 7;
+
+  // An optional additional details that can be provided for further context
+  // about the change.
+  optional google.protobuf.Struct additionalDetails = 8;
+}
+
+// OperationType represents the type of operation that was performed on a
+// resource.
+enum OperationType {
+  OPERATION_UNSPECIFIED = 0;
+  OPERATION_CREATE = 1;
+  OPERATION_UPDATE = 2;
+  OPERATION_DELETE = 3;
+}
+
+// ChangeLogResponse is the response returned by the ChangeLogService after a
+// change log entry is sent.
+message ChangeLogResponse {
+  // A boolean indicating whether the change log entry was successfully sent.
+  bool success = 1;
+
+  // A message that provides further information about the result of sending the
+  // change log entry.
+  string message = 2;
+}
