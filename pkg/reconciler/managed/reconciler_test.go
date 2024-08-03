@@ -18,14 +18,18 @@ package managed
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"google.golang.org/grpc"
+	"google.golang.org/protobuf/types/known/structpb"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -33,8 +37,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	xpv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
+	protov1alpha1 "github.com/crossplane/crossplane-runtime/apis/proto/v1alpha1"
 	"github.com/crossplane/crossplane-runtime/pkg/errors"
+	"github.com/crossplane/crossplane-runtime/pkg/event"
+	"github.com/crossplane/crossplane-runtime/pkg/logging"
 	"github.com/crossplane/crossplane-runtime/pkg/meta"
+	"github.com/crossplane/crossplane-runtime/pkg/reference"
 	"github.com/crossplane/crossplane-runtime/pkg/resource"
 	"github.com/crossplane/crossplane-runtime/pkg/resource/fake"
 	"github.com/crossplane/crossplane-runtime/pkg/test"
@@ -1403,7 +1411,7 @@ func TestReconciler(t *testing.T) {
 			},
 			want: want{result: reconcile.Result{}},
 		},
-		"ManagementPoliciyNotSupported": {
+		"ManagementPolicyNotSupported": {
 			reason: `If an unsupported management policy is used, we should throw an error.`,
 			args: args{
 				m: &fake.Manager{
@@ -1433,7 +1441,7 @@ func TestReconciler(t *testing.T) {
 			},
 			want: want{result: reconcile.Result{}},
 		},
-		"CustomManagementPoliciyNotSupported": {
+		"CustomManagementPolicyNotSupported": {
 			reason: `If a custom unsupported management policy is used, we should throw an error.`,
 			args: args{
 				m: &fake.Manager{
@@ -2317,4 +2325,532 @@ func TestShouldDelete(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A mock implementation of the ChangeLogServiceClient interface to help with
+// testing and verifying change log entries.
+type changeLogServiceClient struct {
+	enable  bool
+	entries []*protov1alpha1.ChangeLogEntry
+	sendFn  func(ctx context.Context, in *protov1alpha1.ChangeLogEntry, opts ...grpc.CallOption) (*protov1alpha1.ChangeLogResponse, error)
+}
+
+func (c *changeLogServiceClient) SendChangeLog(ctx context.Context, in *protov1alpha1.ChangeLogEntry, opts ...grpc.CallOption) (*protov1alpha1.ChangeLogResponse, error) {
+	c.entries = append(c.entries, in)
+	if c.sendFn != nil {
+		return c.sendFn(ctx, in, opts...)
+	}
+	return nil, nil
+}
+
+func TestReconcilerChangeLogs(t *testing.T) {
+	type args struct {
+		m  manager.Manager
+		mg resource.ManagedKind
+		o  []ReconcilerOption
+		c  *changeLogServiceClient
+	}
+
+	type want struct {
+		callCount  int
+		opType     protov1alpha1.OperationType
+		errMessage string
+	}
+
+	now := metav1.Now()
+	errBoom := errors.New("boom")
+
+	cases := map[string]struct {
+		reason string
+		args   args
+		want   want
+	}{
+		"CreateSuccessfulWithoutChangeLogs": {
+			reason: "Successful managed resource creation should not send a create change log entry when change logs are not enabled.",
+			args: args{
+				m: &fake.Manager{
+					Client: &test.MockClient{
+						MockGet:          test.NewMockGetFn(nil),
+						MockUpdate:       test.NewMockUpdateFn(nil),
+						MockStatusUpdate: test.MockSubResourceUpdateFn(func(_ context.Context, _ client.Object, _ ...client.SubResourceUpdateOption) error { return nil }),
+					},
+					Scheme: fake.SchemeWith(&fake.Managed{}),
+				},
+				mg: resource.ManagedKind(fake.GVK(&fake.Managed{})),
+				o: []ReconcilerOption{
+					WithExternalConnecter(ExternalConnectorFn(func(_ context.Context, _ resource.Managed) (ExternalClient, error) {
+						c := &ExternalClientFns{
+							ObserveFn: func(_ context.Context, _ resource.Managed) (ExternalObservation, error) {
+								// resource doesn't exist, which should trigger a create operation
+								return ExternalObservation{ResourceExists: false, ResourceUpToDate: false}, nil
+							},
+							CreateFn: func(_ context.Context, _ resource.Managed) (ExternalCreation, error) {
+								return ExternalCreation{}, nil
+							},
+							DisconnectFn: func(_ context.Context) error {
+								return nil
+							},
+						}
+						return c, nil
+					})),
+				},
+				// disable change logs for this test case
+				c: &changeLogServiceClient{enable: false},
+			},
+			want: want{
+				callCount: 0, // no change logs should be sent
+			},
+		},
+		"CreateSuccessfulWithChangeLogs": {
+			reason: "Successful managed resource creation should send a create change log entry when change logs are enabled.",
+			args: args{
+				m: &fake.Manager{
+					Client: &test.MockClient{
+						MockGet:          test.NewMockGetFn(nil),
+						MockUpdate:       test.NewMockUpdateFn(nil),
+						MockStatusUpdate: test.MockSubResourceUpdateFn(func(_ context.Context, _ client.Object, _ ...client.SubResourceUpdateOption) error { return nil }),
+					},
+					Scheme: fake.SchemeWith(&fake.Managed{}),
+				},
+				mg: resource.ManagedKind(fake.GVK(&fake.Managed{})),
+				o: []ReconcilerOption{
+					WithExternalConnecter(ExternalConnectorFn(func(_ context.Context, _ resource.Managed) (ExternalClient, error) {
+						c := &ExternalClientFns{
+							ObserveFn: func(_ context.Context, _ resource.Managed) (ExternalObservation, error) {
+								// resource doesn't exist, which should trigger a create operation
+								return ExternalObservation{ResourceExists: false, ResourceUpToDate: false}, nil
+							},
+							CreateFn: func(_ context.Context, _ resource.Managed) (ExternalCreation, error) {
+								return ExternalCreation{}, nil
+							},
+							DisconnectFn: func(_ context.Context) error {
+								return nil
+							},
+						}
+						return c, nil
+					})),
+				},
+				c: &changeLogServiceClient{enable: true},
+			},
+			want: want{
+				callCount:  1,
+				opType:     protov1alpha1.OperationType_OPERATION_CREATE,
+				errMessage: "",
+			},
+		},
+		"CreateFailureWithChangeLogs": {
+			reason: "Failed managed resource creation should send a create change log entry with the error when change logs are enabled.",
+			args: args{
+				m: &fake.Manager{
+					Client: &test.MockClient{
+						MockGet:          test.NewMockGetFn(nil),
+						MockUpdate:       test.NewMockUpdateFn(nil),
+						MockStatusUpdate: test.MockSubResourceUpdateFn(func(_ context.Context, _ client.Object, _ ...client.SubResourceUpdateOption) error { return nil }),
+					},
+					Scheme: fake.SchemeWith(&fake.Managed{}),
+				},
+				mg: resource.ManagedKind(fake.GVK(&fake.Managed{})),
+				o: []ReconcilerOption{
+					WithExternalConnecter(ExternalConnectorFn(func(_ context.Context, _ resource.Managed) (ExternalClient, error) {
+						c := &ExternalClientFns{
+							ObserveFn: func(_ context.Context, _ resource.Managed) (ExternalObservation, error) {
+								// resource doesn't exist, which should trigger a create operation
+								return ExternalObservation{ResourceExists: false, ResourceUpToDate: false}, nil
+							},
+							CreateFn: func(_ context.Context, _ resource.Managed) (ExternalCreation, error) {
+								// return an error from Create to simulate a failed creation
+								return ExternalCreation{}, errBoom
+							},
+							DisconnectFn: func(_ context.Context) error {
+								return nil
+							},
+						}
+						return c, nil
+					})),
+				},
+				c: &changeLogServiceClient{enable: true},
+			},
+			want: want{
+				callCount:  1,
+				opType:     protov1alpha1.OperationType_OPERATION_CREATE,
+				errMessage: errBoom.Error(),
+			},
+		},
+		"UpdateSuccessfulWithChangeLogs": {
+			reason: "Successful managed resource update should send an update change log entry when change logs are enabled.",
+			args: args{
+				m: &fake.Manager{
+					Client: &test.MockClient{
+						MockGet:          test.NewMockGetFn(nil),
+						MockUpdate:       test.NewMockUpdateFn(nil),
+						MockStatusUpdate: test.MockSubResourceUpdateFn(func(_ context.Context, _ client.Object, _ ...client.SubResourceUpdateOption) error { return nil }),
+					},
+					Scheme: fake.SchemeWith(&fake.Managed{}),
+				},
+				mg: resource.ManagedKind(fake.GVK(&fake.Managed{})),
+				o: []ReconcilerOption{
+					WithExternalConnecter(ExternalConnectorFn(func(_ context.Context, _ resource.Managed) (ExternalClient, error) {
+						c := &ExternalClientFns{
+							ObserveFn: func(_ context.Context, _ resource.Managed) (ExternalObservation, error) {
+								// resource exists but isn't up to date, which should trigger an update operation
+								return ExternalObservation{ResourceExists: true, ResourceUpToDate: false}, nil
+							},
+							UpdateFn: func(_ context.Context, _ resource.Managed) (ExternalUpdate, error) {
+								return ExternalUpdate{}, nil
+							},
+							DisconnectFn: func(_ context.Context) error {
+								return nil
+							},
+						}
+						return c, nil
+					})),
+				},
+				c: &changeLogServiceClient{enable: true},
+			},
+			want: want{
+				callCount:  1,
+				opType:     protov1alpha1.OperationType_OPERATION_UPDATE,
+				errMessage: "",
+			},
+		},
+		"UpdateFailureWithChangeLogs": {
+			reason: "Failed managed resource update should send an update change log entry with the error when change logs are enabled.",
+			args: args{
+				m: &fake.Manager{
+					Client: &test.MockClient{
+						MockGet:          test.NewMockGetFn(nil),
+						MockUpdate:       test.NewMockUpdateFn(nil),
+						MockStatusUpdate: test.MockSubResourceUpdateFn(func(_ context.Context, _ client.Object, _ ...client.SubResourceUpdateOption) error { return nil }),
+					},
+					Scheme: fake.SchemeWith(&fake.Managed{}),
+				},
+				mg: resource.ManagedKind(fake.GVK(&fake.Managed{})),
+				o: []ReconcilerOption{
+					WithExternalConnecter(ExternalConnectorFn(func(_ context.Context, _ resource.Managed) (ExternalClient, error) {
+						c := &ExternalClientFns{
+							ObserveFn: func(_ context.Context, _ resource.Managed) (ExternalObservation, error) {
+								// resource exists but isn't up to date, which should trigger an update operation
+								return ExternalObservation{ResourceExists: true, ResourceUpToDate: false}, nil
+							},
+							UpdateFn: func(_ context.Context, _ resource.Managed) (ExternalUpdate, error) {
+								// return an error from Update to simulate a failed update
+								return ExternalUpdate{}, errBoom
+							},
+							DisconnectFn: func(_ context.Context) error {
+								return nil
+							},
+						}
+						return c, nil
+					})),
+				},
+				c: &changeLogServiceClient{enable: true},
+			},
+			want: want{
+				callCount:  1,
+				opType:     protov1alpha1.OperationType_OPERATION_UPDATE,
+				errMessage: errBoom.Error(),
+			},
+		},
+		"DeleteSuccessfulWithChangeLogs": {
+			reason: "Successful managed resource delete should send a delete change log entry when change logs are enabled.",
+			args: args{
+				m: &fake.Manager{
+					Client: &test.MockClient{
+						MockGet: test.NewMockGetFn(nil, func(obj client.Object) error {
+							// set a deletion timestamp, which should trigger a delete operation
+							mg := obj.(*fake.Managed)
+							mg.SetDeletionTimestamp(&now)
+							mg.SetDeletionPolicy(xpv1.DeletionDelete)
+							return nil
+						}),
+						MockUpdate:       test.NewMockUpdateFn(nil),
+						MockStatusUpdate: test.MockSubResourceUpdateFn(func(_ context.Context, _ client.Object, _ ...client.SubResourceUpdateOption) error { return nil }),
+					},
+					Scheme: fake.SchemeWith(&fake.Managed{}),
+				},
+				mg: resource.ManagedKind(fake.GVK(&fake.Managed{})),
+				o: []ReconcilerOption{
+					WithExternalConnecter(ExternalConnectorFn(func(_ context.Context, _ resource.Managed) (ExternalClient, error) {
+						c := &ExternalClientFns{
+							ObserveFn: func(_ context.Context, _ resource.Managed) (ExternalObservation, error) {
+								// resource exists but we set a deletion timestamp above, which should trigger a delete operation
+								return ExternalObservation{ResourceExists: true}, nil
+							},
+							DeleteFn: func(_ context.Context, _ resource.Managed) error {
+								return nil
+							},
+							DisconnectFn: func(_ context.Context) error {
+								return nil
+							},
+						}
+						return c, nil
+					})),
+				},
+				c: &changeLogServiceClient{enable: true},
+			},
+			want: want{
+				callCount:  1,
+				opType:     protov1alpha1.OperationType_OPERATION_DELETE,
+				errMessage: "",
+			},
+		},
+		"DeleteFailureWithChangeLogs": {
+			reason: "Failed managed resource delete should send a delete change log entry with the error when change logs are enabled.",
+			args: args{
+				m: &fake.Manager{
+					Client: &test.MockClient{
+						MockGet: test.NewMockGetFn(nil, func(obj client.Object) error {
+							// set a deletion timestamp, which should trigger a delete operation
+							mg := obj.(*fake.Managed)
+							mg.SetDeletionTimestamp(&now)
+							mg.SetDeletionPolicy(xpv1.DeletionDelete)
+							return nil
+						}),
+						MockUpdate:       test.NewMockUpdateFn(nil),
+						MockStatusUpdate: test.MockSubResourceUpdateFn(func(_ context.Context, _ client.Object, _ ...client.SubResourceUpdateOption) error { return nil }),
+					},
+					Scheme: fake.SchemeWith(&fake.Managed{}),
+				},
+				mg: resource.ManagedKind(fake.GVK(&fake.Managed{})),
+				o: []ReconcilerOption{
+					WithExternalConnecter(ExternalConnectorFn(func(_ context.Context, _ resource.Managed) (ExternalClient, error) {
+						c := &ExternalClientFns{
+							ObserveFn: func(_ context.Context, _ resource.Managed) (ExternalObservation, error) {
+								// resource exists but we set a deletion timestamp above, which should trigger a delete operation
+								return ExternalObservation{ResourceExists: true}, nil
+							},
+							DeleteFn: func(_ context.Context, _ resource.Managed) error {
+								// return an error from Delete to simulate a failed delete
+								return errBoom
+							},
+							DisconnectFn: func(_ context.Context) error {
+								return nil
+							},
+						}
+						return c, nil
+					})),
+				},
+				c: &changeLogServiceClient{enable: true},
+			},
+			want: want{
+				callCount:  1,
+				opType:     protov1alpha1.OperationType_OPERATION_DELETE,
+				errMessage: errBoom.Error(),
+			},
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			if tc.args.c.enable {
+				// enable change logs with the given test client
+				tc.args.o = append(tc.args.o, WithChangeLogs(tc.args.c, "provider-cool:v9.99.999"))
+			}
+			r := NewReconciler(tc.args.m, tc.args.mg, tc.args.o...)
+			r.Reconcile(context.Background(), reconcile.Request{})
+
+			if diff := cmp.Diff(tc.want.callCount, len(tc.args.c.entries)); diff != "" {
+				t.Errorf("\nReason: %s\nr.Reconcile(...): -want callCount, +got callCount:\n%s", tc.reason, diff)
+			}
+
+			if tc.want.callCount > 0 {
+				if diff := cmp.Diff(tc.want.opType, tc.args.c.entries[0].GetOperation()); diff != "" {
+					t.Errorf("\nReason: %s\nr.Reconcile(...): -want opType, +got opType:\n%s", tc.reason, diff)
+				}
+
+				if diff := cmp.Diff(tc.want.errMessage, tc.args.c.entries[0].GetErrorMessage()); diff != "" {
+					t.Errorf("\nReason: %s\nr.Reconcile(...): -want errMessage, +got errMessage:\n%s", tc.reason, diff)
+				}
+			}
+		})
+	}
+}
+
+func TestRecordChangeLog(t *testing.T) {
+	type args struct {
+		m   manager.Manager
+		mg  resource.ManagedKind
+		o   []ReconcilerOption
+		mr  resource.Managed
+		ad  *AdditionalDetails
+		err error
+		c   *changeLogServiceClient
+	}
+
+	type want struct {
+		entries []*protov1alpha1.ChangeLogEntry
+		events  []event.Event
+	}
+
+	errBoom := errors.New("boom")
+
+	cases := map[string]struct {
+		reason string
+		args   args
+		want   want
+	}{
+		"ChangeLogsNotEnabled": {
+			reason: "No change logs should be recorded when change logs are not enabled.",
+			args: args{
+				m: &fake.Manager{
+					Client: &test.MockClient{},
+					Scheme: fake.SchemeWith(&fake.Managed{}),
+				},
+				mg: resource.ManagedKind(fake.GVK(&fake.Managed{})),
+				o:  []ReconcilerOption{},
+				// disable change logs for this test case
+				c: &changeLogServiceClient{enable: false, entries: nil},
+			},
+			want: want{
+				entries: nil, // no change logs should be sent
+			},
+		},
+		"ChangeLogsEnabled": {
+			reason: "Change log entry should be recorded when change logs are enabled.",
+			args: args{
+				m: &fake.Manager{
+					Client: &test.MockClient{},
+					Scheme: fake.SchemeWith(&fake.Managed{}),
+				},
+				mg: resource.ManagedKind(fake.GVK(&fake.Managed{})),
+				o:  []ReconcilerOption{},
+				mr: &fake.Managed{ObjectMeta: metav1.ObjectMeta{
+					Name:        "cool-managed",
+					Annotations: map[string]string{meta.AnnotationKeyExternalName: "cool-managed"},
+				}},
+				err: errBoom,
+				ad:  &AdditionalDetails{"key": "value", "key2": map[string]int{"foo": 1, "bar": 2}},
+				c:   &changeLogServiceClient{enable: true, entries: []*protov1alpha1.ChangeLogEntry{}},
+			},
+			want: want{
+				// a well fleshed out change log entry should be sent
+				entries: []*protov1alpha1.ChangeLogEntry{
+					{
+						Provider:     "provider-cool:v9.99.999",
+						Type:         (&fake.Managed{}).GetObjectKind().GroupVersionKind().String(),
+						Name:         "cool-managed",
+						ExternalName: "cool-managed",
+						Operation:    protov1alpha1.OperationType_OPERATION_CREATE,
+						Snapshot: mustObjectAsStruct(&fake.Managed{ObjectMeta: metav1.ObjectMeta{
+							Name:        "cool-managed",
+							Annotations: map[string]string{meta.AnnotationKeyExternalName: "cool-managed"},
+						}}),
+						ErrorMessage:      reference.ToPtrValue("boom"),
+						AdditionalDetails: mustAdditionalDetailsAsStruct(&AdditionalDetails{"key": "value", "key2": map[string]int{"foo": 1, "bar": 2}}),
+					},
+				},
+			},
+		},
+		"SendChangeLogsFailure": {
+			reason: "Error from sending change log entry should be handled and recorded.",
+			args: args{
+				m: &fake.Manager{
+					Client: &test.MockClient{},
+					Scheme: fake.SchemeWith(&fake.Managed{}),
+				},
+				mg: resource.ManagedKind(fake.GVK(&fake.Managed{})),
+				o:  []ReconcilerOption{},
+				mr: &fake.Managed{},
+				c: &changeLogServiceClient{
+					enable:  true,
+					entries: []*protov1alpha1.ChangeLogEntry{},
+					// make the send change log function return an error
+					sendFn: func(_ context.Context, _ *protov1alpha1.ChangeLogEntry, _ ...grpc.CallOption) (*protov1alpha1.ChangeLogResponse, error) {
+						return &protov1alpha1.ChangeLogResponse{Success: false, Message: "entry failed to send"}, errBoom
+					},
+				},
+			},
+			want: want{
+				// we'll still see a change log entry, but it won't make it all
+				// the way to its destination and we should see an event for
+				// that failure
+				entries: []*protov1alpha1.ChangeLogEntry{
+					{
+						// we expect less fields to be set on the change log
+						// entry because we're not initializing the managed
+						// resource with much data in this simulated failure
+						// test case
+						Provider:  "provider-cool:v9.99.999",
+						Type:      (&fake.Managed{}).GetObjectKind().GroupVersionKind().String(),
+						Operation: protov1alpha1.OperationType_OPERATION_CREATE,
+						Snapshot:  mustObjectAsStruct(&fake.Managed{}),
+					},
+				},
+				events: []event.Event{
+					{
+						// we do expect an event to be recorded for the send failure
+						Type:        event.TypeWarning,
+						Reason:      reasonCannotSendChangeLog,
+						Message:     errBoom.Error(),
+						Annotations: map[string]string{},
+					},
+				},
+			},
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			if tc.args.c.enable {
+				// enable change logs with the given test client
+				tc.args.o = append(tc.args.o, WithChangeLogs(tc.args.c, "provider-cool:v9.99.999"))
+			}
+
+			r := NewReconciler(tc.args.m, tc.args.mg, tc.args.o...)
+			logger := logging.NewNopLogger()
+			recorder := newMockRecorder()
+			snapshot := r.takeChangeLogSnapshot(tc.args.mr, logger, recorder)
+			r.recordChangeLog(context.Background(), tc.args.mr, snapshot, logger, recorder,
+				protov1alpha1.OperationType_OPERATION_CREATE, tc.args.err, tc.args.ad)
+
+			// we ignore unexported fields in the protobuf related types, we
+			// don't care much for the internals that cmp doesn't handle
+			// well. The exported fields are good enough.
+			ignoreUnexported := cmpopts.IgnoreUnexported(protov1alpha1.ChangeLogEntry{}, structpb.Struct{}, structpb.Value{})
+
+			if diff := cmp.Diff(tc.want.entries, tc.args.c.entries, ignoreUnexported); diff != "" {
+				t.Errorf("\nReason: %s\nr.recordChangeLog(...): -want entries, +got entries:\n%s", tc.reason, diff)
+			}
+
+			if diff := cmp.Diff(tc.want.events, recorder.events); diff != "" {
+				t.Errorf("\nReason: %s\nr.recordChangeLog(...): -want events, +got events:\n%s", tc.reason, diff)
+			}
+		})
+	}
+}
+
+// mockRecorder will record events seen during the test cases.
+type mockRecorder struct {
+	events []event.Event
+}
+
+func newMockRecorder() *mockRecorder {
+	return &mockRecorder{}
+}
+
+func (r *mockRecorder) Event(_ runtime.Object, e event.Event) {
+	r.events = append(r.events, e)
+}
+
+func (r *mockRecorder) WithAnnotations(_ ...string) event.Recorder { return r }
+
+func mustObjectAsStruct(o runtime.Object) *structpb.Struct {
+	s, err := resource.AsStruct(o)
+	if err != nil {
+		panic(err)
+	}
+	return s
+}
+
+func mustAdditionalDetailsAsStruct(ad *AdditionalDetails) *structpb.Struct {
+	b, err := json.Marshal(ad)
+	if err != nil {
+		panic(err)
+	}
+
+	ads := &structpb.Struct{}
+	if err = ads.UnmarshalJSON(b); err != nil {
+		panic(err)
+	}
+	return ads
 }
