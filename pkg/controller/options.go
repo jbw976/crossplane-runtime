@@ -24,6 +24,7 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 
+	protov1alpha1 "github.com/crossplane/crossplane-runtime/apis/proto/v1alpha1"
 	"github.com/crossplane/crossplane-runtime/pkg/feature"
 	"github.com/crossplane/crossplane-runtime/pkg/logging"
 	"github.com/crossplane/crossplane-runtime/pkg/ratelimiter"
@@ -67,6 +68,9 @@ type Options struct {
 
 	// MetricOptions for recording metrics.
 	MetricOptions *MetricOptions
+
+	// ChangeLogOptions for recording change logs.
+	ChangeLogOptions *ChangeLogOptions
 }
 
 // ForControllerRuntime extracts options for controller-runtime.
@@ -96,4 +100,11 @@ type MetricOptions struct {
 
 	// MRStateMetrics to use for recording state metrics.
 	MRStateMetrics *statemetrics.MRStateMetrics
+}
+
+// ChangeLogOptions for recording changes to managed resources into the change
+// logs.
+type ChangeLogOptions struct {
+	ChangeLogClient protov1alpha1.ChangeLogServiceClient
+	ProviderVersion string
 }

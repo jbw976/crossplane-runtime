@@ -18,10 +18,13 @@ package managed
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"math/rand"
 	"strings"
 	"time"
 
+	"google.golang.org/protobuf/types/known/structpb"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -30,11 +33,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	xpv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
+	protov1alpha1 "github.com/crossplane/crossplane-runtime/apis/proto/v1alpha1"
 	"github.com/crossplane/crossplane-runtime/pkg/errors"
 	"github.com/crossplane/crossplane-runtime/pkg/event"
 	"github.com/crossplane/crossplane-runtime/pkg/feature"
 	"github.com/crossplane/crossplane-runtime/pkg/logging"
 	"github.com/crossplane/crossplane-runtime/pkg/meta"
+	"github.com/crossplane/crossplane-runtime/pkg/reference"
 	"github.com/crossplane/crossplane-runtime/pkg/resource"
 )
 
@@ -81,6 +86,7 @@ const (
 	reasonCannotUpdate            event.Reason = "CannotUpdateExternalResource"
 	reasonCannotUpdateManaged     event.Reason = "CannotUpdateManagedResource"
 	reasonManagementPolicyInvalid event.Reason = "CannotUseInvalidManagementPolicy"
+	reasonCannotSendChangeLog     event.Reason = "CannotSendChangeLog"
 
 	reasonDeleted event.Reason = "DeletedExternalResource"
 	reasonCreated event.Reason = "CreatedExternalResource"
@@ -137,6 +143,11 @@ func (fn CriticalAnnotationUpdateFn) UpdateCriticalAnnotations(ctx context.Conte
 // ConnectionDetails created or updated during an operation on an external
 // resource, for example usernames, passwords, endpoints, ports, etc.
 type ConnectionDetails map[string][]byte
+
+// AdditionalDetails represent any additional details the external client wants
+// to return about an operation that has been performed. These details will be
+// included in the change logs.
+type AdditionalDetails map[string]any
 
 // A ConnectionPublisher manages the supplied ConnectionDetails for the
 // supplied Managed resource. ManagedPublishers must handle the case in which
@@ -466,6 +477,10 @@ type ExternalCreation struct {
 	// unless an existing key is overwritten. Crossplane may publish these
 	// credentials to a store (e.g. a Secret).
 	ConnectionDetails ConnectionDetails
+
+	// AdditionalDetails represent any additional details the external client
+	// wants to return about the creation operation that was performed.
+	AdditionalDetails *AdditionalDetails
 }
 
 // An ExternalUpdate is the result of an update to an external resource.
@@ -476,6 +491,10 @@ type ExternalUpdate struct {
 	// unless an existing key is overwritten. Crossplane may publish these
 	// credentials to a store (e.g. a Secret).
 	ConnectionDetails ConnectionDetails
+
+	// AdditionalDetails represent any additional details the external client
+	// wants to return about the update operation that was performed.
+	AdditionalDetails *AdditionalDetails
 }
 
 // A Reconciler reconciles managed resources by creating and managing the
@@ -503,9 +522,11 @@ type Reconciler struct {
 
 	supportedManagementPolicies []sets.Set[xpv1.ManagementAction]
 
-	log            logging.Logger
-	record         event.Recorder
-	metricRecorder MetricRecorder
+	log             logging.Logger
+	record          event.Recorder
+	metricRecorder  MetricRecorder
+	changeLogClient protov1alpha1.ChangeLogServiceClient
+	providerVersion string
 }
 
 type mrManaged struct {
@@ -697,6 +718,16 @@ func WithManagementPolicies() ReconcilerOption {
 func WithReconcilerSupportedManagementPolicies(supported []sets.Set[xpv1.ManagementAction]) ReconcilerOption {
 	return func(r *Reconciler) {
 		r.supportedManagementPolicies = supported
+	}
+}
+
+// WithChangeLogs enables support for capturing change logs during
+// reconciliation.
+func WithChangeLogs(c protov1alpha1.ChangeLogServiceClient, pv string) ReconcilerOption {
+	return func(r *Reconciler) {
+		r.features.Enable(feature.EnableAlphaChangeLogs)
+		r.changeLogClient = c
+		r.providerVersion = pv
 	}
 }
 
@@ -972,6 +1003,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 		return reconcile.Result{Requeue: true}, nil
 	}
 
+	// take a snapshot of the managed resource now that we've called Observe()
+	// and have not performed any external operations
+	snapshot := r.takeChangeLogSnapshot(managed, log, record)
+
 	if meta.WasDeleted(managed) {
 		log = log.WithValues("deletion-timestamp", managed.GetDeletionTimestamp())
 
@@ -984,6 +1019,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 				// status with the new error condition. If not, we want requeue
 				// explicitly, which will trigger backoff.
 				log.Debug("Cannot delete external resource", "error", err)
+				r.recordChangeLog(ctx, managed, snapshot, log, record, protov1alpha1.OperationType_OPERATION_DELETE, err, nil)
 				record.Event(managed, event.Warning(reasonCannotDelete, err))
 				managed.SetConditions(xpv1.Deleting(), xpv1.ReconcileError(errors.Wrap(err, errReconcileDelete)))
 				return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, managed), errUpdateManagedStatus)
@@ -997,6 +1033,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 			// unpublish and finalize. If it still exists we'll re-enter this
 			// block and try again.
 			log.Debug("Successfully requested deletion of external resource")
+			r.recordChangeLog(ctx, managed, snapshot, log, record, protov1alpha1.OperationType_OPERATION_DELETE, nil, nil)
 			record.Event(managed, event.Normal(reasonDeleted, "Successfully requested deletion of external resource"))
 			managed.SetConditions(xpv1.Deleting(), xpv1.ReconcileSuccess())
 			return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, managed), errUpdateManagedStatus)
@@ -1110,6 +1147,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 				// create failed.
 			}
 
+			r.recordChangeLog(ctx, managed, snapshot, log, record, protov1alpha1.OperationType_OPERATION_CREATE, err, creation.AdditionalDetails)
 			managed.SetConditions(xpv1.Creating(), xpv1.ReconcileError(errors.Wrap(err, errReconcileCreate)))
 			return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, managed), errUpdateManagedStatus)
 		}
@@ -1117,6 +1155,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 		// In some cases our external-name may be set by Create above.
 		log = log.WithValues("external-name", meta.GetExternalName(managed))
 		record = r.record.WithAnnotations("external-name", meta.GetExternalName(managed))
+
+		r.recordChangeLog(ctx, managed, snapshot, log, record, protov1alpha1.OperationType_OPERATION_CREATE, nil, creation.AdditionalDetails)
 
 		// We handle annotations specially here because it's critical
 		// that they are persisted to the API server. If we don't remove
@@ -1219,6 +1259,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 		// requeued implicitly when we update our status with the new error
 		// condition. If not, we requeue explicitly, which will trigger backoff.
 		log.Debug("Cannot update external resource")
+		r.recordChangeLog(ctx, managed, snapshot, log, record, protov1alpha1.OperationType_OPERATION_UPDATE, err, update.AdditionalDetails)
 		record.Event(managed, event.Warning(reasonCannotUpdate, err))
 		managed.SetConditions(xpv1.ReconcileError(errors.Wrap(err, errReconcileUpdate)))
 		return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, managed), errUpdateManagedStatus)
@@ -1226,6 +1267,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 
 	// record the drift after the successful update.
 	r.metricRecorder.recordDrift(managed)
+
+	r.recordChangeLog(ctx, managed, snapshot, log, record, protov1alpha1.OperationType_OPERATION_UPDATE, nil, update.AdditionalDetails)
 
 	if _, err := r.managed.PublishConnection(ctx, managed, update.ConnectionDetails); err != nil {
 		// If this is the first time we encounter this issue we'll be requeued
@@ -1247,4 +1290,93 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 	record.Event(managed, event.Normal(reasonUpdated, "Successfully requested update of external resource"))
 	managed.SetConditions(xpv1.ReconcileSuccess())
 	return reconcile.Result{RequeueAfter: reconcileAfter}, errors.Wrap(r.client.Status().Update(ctx, managed), errUpdateManagedStatus)
+}
+
+// recordChangeLog constructs a change log entry from the provided information
+// and sends it to the change log service, if the feature is enabled. If errors
+// are encountered during this process, then logs/events will be recorded for
+// each, but the process will continue. We are choosing to send all the
+// information we can to the change logs as opposed to sending nothing.
+func (r *Reconciler) recordChangeLog(ctx context.Context, managed resource.Managed, snapshot *structpb.Struct, log logging.Logger,
+	record event.Recorder, opType protov1alpha1.OperationType, changeErr error, ad *AdditionalDetails,
+) {
+	if !r.features.Enabled(feature.EnableAlphaChangeLogs) {
+		// change log feature isn't enabled, just return immediately
+		return
+	}
+
+	// convert any additional details to a Struct to include in the change log entry
+	var ads *structpb.Struct
+	if ad != nil {
+		b, err := json.Marshal(ad)
+		if err != nil {
+			log.Debug("Cannot marshal additional details", "error", err)
+			record.Event(managed, event.Warning(reasonCannotSendChangeLog, err))
+		} else {
+			ads = &structpb.Struct{}
+			if err = ads.UnmarshalJSON(b); err != nil {
+				log.Debug("Cannot convert additional details to Struct", "error", err)
+				record.Event(managed, event.Warning(reasonCannotSendChangeLog, err))
+				ads = nil
+			}
+		}
+	}
+
+	// determine the full namespaced name of the managed resource
+	var namespacedName string
+	namespace := managed.GetNamespace()
+	if namespace != "" {
+		namespacedName = fmt.Sprintf("%s/%s", namespace, managed.GetName())
+	} else {
+		namespacedName = managed.GetName()
+	}
+
+	// get an error message from the error if it exists
+	var changeErrMessage *string
+	if changeErr != nil {
+		changeErrMessage = reference.ToPtrValue(changeErr.Error())
+	}
+
+	// send everything we've got to the change log service
+	cle := &protov1alpha1.ChangeLogEntry{
+		Provider:          r.providerVersion,
+		Type:              managed.GetObjectKind().GroupVersionKind().String(),
+		Name:              namespacedName,
+		ExternalName:      meta.GetExternalName(managed),
+		Operation:         opType,
+		Snapshot:          snapshot,
+		ErrorMessage:      changeErrMessage,
+		AdditionalDetails: ads,
+	}
+
+	clr, err := r.changeLogClient.SendChangeLog(ctx, cle)
+	if err != nil {
+		log.Debug("Cannot send change log entry", "error", err)
+		record.Event(managed, event.Warning(reasonCannotSendChangeLog, err))
+		return
+	}
+
+	log.Debug("Sent change log entry", "changeLogResponse", clr)
+}
+
+// takeChangeLogSnapshot attempts to take a snapshot of the given managed
+// resource by converting it to a Struct that will be sent to the change logs
+// after an external operation is performed, if the change logs feature is
+// enabled. If there is an error during this process, an event will be recorded
+// and a nil snapshot will be returned.
+func (r *Reconciler) takeChangeLogSnapshot(managed resource.Managed, log logging.Logger, record event.Recorder) *structpb.Struct {
+	if !r.features.Enabled(feature.EnableAlphaChangeLogs) {
+		// change log feature isn't enabled, just return immediately
+		return nil
+	}
+
+	// capture the full state of the managed resource from before we performed the change
+	snapshot, err := resource.AsStruct(managed)
+	if err != nil {
+		log.Debug("Cannot snapshot managed resource", "error", err)
+		record.Event(managed, event.Warning(reasonCannotSendChangeLog, err))
+		return nil
+	}
+
+	return snapshot
 }
