@@ -14,7 +14,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.3.0
 // - protoc             (unknown)
-// source: proto/v1alpha1/changelog.proto
+// source: changelogs/proto/v1alpha1/changelog.proto
 
 // buf:lint:ignore PACKAGE_DIRECTORY_MATCH
 
@@ -33,7 +33,7 @@ import (
 const _ = grpc.SupportPackageIsVersion7
 
 const (
-	ChangeLogService_SendChangeLog_FullMethodName = "/changelog.proto.v1alpha1.ChangeLogService/SendChangeLog"
+	ChangeLogService_SendChangeLog_FullMethodName = "/changelogs.proto.v1alpha1.ChangeLogService/SendChangeLog"
 )
 
 // ChangeLogServiceClient is the client API for ChangeLogService service.
@@ -41,7 +41,7 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type ChangeLogServiceClient interface {
 	// SendChangeLog sends a change log entry to the change log service.
-	SendChangeLog(ctx context.Context, in *ChangeLogEntry, opts ...grpc.CallOption) (*ChangeLogResponse, error)
+	SendChangeLog(ctx context.Context, in *SendChangeLogRequest, opts ...grpc.CallOption) (*SendChangeLogResponse, error)
 }
 
 type changeLogServiceClient struct {
@@ -52,8 +52,8 @@ func NewChangeLogServiceClient(cc grpc.ClientConnInterface) ChangeLogServiceClie
 	return &changeLogServiceClient{cc}
 }
 
-func (c *changeLogServiceClient) SendChangeLog(ctx context.Context, in *ChangeLogEntry, opts ...grpc.CallOption) (*ChangeLogResponse, error) {
-	out := new(ChangeLogResponse)
+func (c *changeLogServiceClient) SendChangeLog(ctx context.Context, in *SendChangeLogRequest, opts ...grpc.CallOption) (*SendChangeLogResponse, error) {
+	out := new(SendChangeLogResponse)
 	err := c.cc.Invoke(ctx, ChangeLogService_SendChangeLog_FullMethodName, in, out, opts...)
 	if err != nil {
 		return nil, err
@@ -66,7 +66,7 @@ func (c *changeLogServiceClient) SendChangeLog(ctx context.Context, in *ChangeLo
 // for forward compatibility
 type ChangeLogServiceServer interface {
 	// SendChangeLog sends a change log entry to the change log service.
-	SendChangeLog(context.Context, *ChangeLogEntry) (*ChangeLogResponse, error)
+	SendChangeLog(context.Context, *SendChangeLogRequest) (*SendChangeLogResponse, error)
 	mustEmbedUnimplementedChangeLogServiceServer()
 }
 
@@ -74,7 +74,7 @@ type ChangeLogServiceServer interface {
 type UnimplementedChangeLogServiceServer struct {
 }
 
-func (UnimplementedChangeLogServiceServer) SendChangeLog(context.Context, *ChangeLogEntry) (*ChangeLogResponse, error) {
+func (UnimplementedChangeLogServiceServer) SendChangeLog(context.Context, *SendChangeLogRequest) (*SendChangeLogResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SendChangeLog not implemented")
 }
 func (UnimplementedChangeLogServiceServer) mustEmbedUnimplementedChangeLogServiceServer() {}
@@ -91,7 +91,7 @@ func RegisterChangeLogServiceServer(s grpc.ServiceRegistrar, srv ChangeLogServic
 }
 
 func _ChangeLogService_SendChangeLog_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ChangeLogEntry)
+	in := new(SendChangeLogRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
@@ -103,7 +103,7 @@ func _ChangeLogService_SendChangeLog_Handler(srv interface{}, ctx context.Contex
 		FullMethod: ChangeLogService_SendChangeLog_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ChangeLogServiceServer).SendChangeLog(ctx, req.(*ChangeLogEntry))
+		return srv.(ChangeLogServiceServer).SendChangeLog(ctx, req.(*SendChangeLogRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -112,7 +112,7 @@ func _ChangeLogService_SendChangeLog_Handler(srv interface{}, ctx context.Contex
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var ChangeLogService_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "changelog.proto.v1alpha1.ChangeLogService",
+	ServiceName: "changelogs.proto.v1alpha1.ChangeLogService",
 	HandlerType: (*ChangeLogServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
@@ -121,5 +121,5 @@ var ChangeLogService_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "proto/v1alpha1/changelog.proto",
+	Metadata: "changelogs/proto/v1alpha1/changelog.proto",
 }

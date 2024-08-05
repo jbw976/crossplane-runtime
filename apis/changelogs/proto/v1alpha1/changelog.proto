@@ -16,20 +16,20 @@ syntax = "proto3";
 import "google/protobuf/struct.proto";
 
 // buf:lint:ignore PACKAGE_DIRECTORY_MATCH
-package changelog.proto.v1alpha1;
+package changelogs.proto.v1alpha1;
 
-option go_package = "github.com/crossplane/crossplane-runtime/apis/proto/v1alpha1";
+option go_package = "github.com/crossplane/crossplane-runtime/apis/changelogs/proto/v1alpha1";
 
 // ChangeLogService is a service that provides the ability to send change log
 // entries.
 service ChangeLogService {
   // SendChangeLog sends a change log entry to the change log service.
-  rpc SendChangeLog (ChangeLogEntry) returns (ChangeLogResponse) {}
+  rpc SendChangeLog (SendChangeLogRequest) returns (SendChangeLogResponse) {}
 }
 
-// ChangeLogEntry represents a single change log entry, with detailed
+// SendChangeLogRequest represents a single change log entry, with detailed
 // information about the resource that was changed.
-message ChangeLogEntry {
+message SendChangeLogRequest {
   // The name and version of the provider that is making the change to the
   // resource.
   string provider = 1;
@@ -41,7 +41,7 @@ message ChangeLogEntry {
   string name = 3;
 
   // The external name of the resource that was changed.
-  string externalName = 4;
+  string external_name = 4;
 
   // The type of operation that was performed on the resource, e.g. Create,
   // Update, or Delete.
@@ -53,25 +53,25 @@ message ChangeLogEntry {
 
   // An optional error message that describes any error encountered while
   // performing the operation on the resource.
-  optional string errorMessage = 7;
+  optional string error_message = 7;
 
   // An optional additional details that can be provided for further context
   // about the change.
-  optional google.protobuf.Struct additionalDetails = 8;
+  optional google.protobuf.Struct additional_details = 8;
 }
 
 // OperationType represents the type of operation that was performed on a
 // resource.
 enum OperationType {
-  OPERATION_UNSPECIFIED = 0;
-  OPERATION_CREATE = 1;
-  OPERATION_UPDATE = 2;
-  OPERATION_DELETE = 3;
+  OPERATION_TYPE_UNSPECIFIED = 0;
+  OPERATION_TYPE_CREATE = 1;
+  OPERATION_TYPE_UPDATE = 2;
+  OPERATION_TYPE_DELETE = 3;
 }
 
-// ChangeLogResponse is the response returned by the ChangeLogService after a
+// SendChangeLogResponse is the response returned by the ChangeLogService after a
 // change log entry is sent.
-message ChangeLogResponse {
+message SendChangeLogResponse {
   // A boolean indicating whether the change log entry was successfully sent.
   bool success = 1;
 

@@ -36,8 +36,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	changelogs "github.com/crossplane/crossplane-runtime/apis/changelogs/proto/v1alpha1"
 	xpv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
-	protov1alpha1 "github.com/crossplane/crossplane-runtime/apis/proto/v1alpha1"
 	"github.com/crossplane/crossplane-runtime/pkg/errors"
 	"github.com/crossplane/crossplane-runtime/pkg/event"
 	"github.com/crossplane/crossplane-runtime/pkg/logging"
@@ -2331,11 +2331,11 @@ func TestShouldDelete(t *testing.T) {
 // testing and verifying change log entries.
 type changeLogServiceClient struct {
 	enable  bool
-	entries []*protov1alpha1.ChangeLogEntry
-	sendFn  func(ctx context.Context, in *protov1alpha1.ChangeLogEntry, opts ...grpc.CallOption) (*protov1alpha1.ChangeLogResponse, error)
+	entries []*changelogs.SendChangeLogRequest
+	sendFn  func(ctx context.Context, in *changelogs.SendChangeLogRequest, opts ...grpc.CallOption) (*changelogs.SendChangeLogResponse, error)
 }
 
-func (c *changeLogServiceClient) SendChangeLog(ctx context.Context, in *protov1alpha1.ChangeLogEntry, opts ...grpc.CallOption) (*protov1alpha1.ChangeLogResponse, error) {
+func (c *changeLogServiceClient) SendChangeLog(ctx context.Context, in *changelogs.SendChangeLogRequest, opts ...grpc.CallOption) (*changelogs.SendChangeLogResponse, error) {
 	c.entries = append(c.entries, in)
 	if c.sendFn != nil {
 		return c.sendFn(ctx, in, opts...)
@@ -2353,7 +2353,7 @@ func TestReconcilerChangeLogs(t *testing.T) {
 
 	type want struct {
 		callCount  int
-		opType     protov1alpha1.OperationType
+		opType     changelogs.OperationType
 		errMessage string
 	}
 
@@ -2434,7 +2434,7 @@ func TestReconcilerChangeLogs(t *testing.T) {
 			},
 			want: want{
 				callCount:  1,
-				opType:     protov1alpha1.OperationType_OPERATION_CREATE,
+				opType:     changelogs.OperationType_OPERATION_TYPE_CREATE,
 				errMessage: "",
 			},
 		},
@@ -2472,7 +2472,7 @@ func TestReconcilerChangeLogs(t *testing.T) {
 			},
 			want: want{
 				callCount:  1,
-				opType:     protov1alpha1.OperationType_OPERATION_CREATE,
+				opType:     changelogs.OperationType_OPERATION_TYPE_CREATE,
 				errMessage: errBoom.Error(),
 			},
 		},
@@ -2509,7 +2509,7 @@ func TestReconcilerChangeLogs(t *testing.T) {
 			},
 			want: want{
 				callCount:  1,
-				opType:     protov1alpha1.OperationType_OPERATION_UPDATE,
+				opType:     changelogs.OperationType_OPERATION_TYPE_UPDATE,
 				errMessage: "",
 			},
 		},
@@ -2547,7 +2547,7 @@ func TestReconcilerChangeLogs(t *testing.T) {
 			},
 			want: want{
 				callCount:  1,
-				opType:     protov1alpha1.OperationType_OPERATION_UPDATE,
+				opType:     changelogs.OperationType_OPERATION_TYPE_UPDATE,
 				errMessage: errBoom.Error(),
 			},
 		},
@@ -2590,7 +2590,7 @@ func TestReconcilerChangeLogs(t *testing.T) {
 			},
 			want: want{
 				callCount:  1,
-				opType:     protov1alpha1.OperationType_OPERATION_DELETE,
+				opType:     changelogs.OperationType_OPERATION_TYPE_DELETE,
 				errMessage: "",
 			},
 		},
@@ -2634,7 +2634,7 @@ func TestReconcilerChangeLogs(t *testing.T) {
 			},
 			want: want{
 				callCount:  1,
-				opType:     protov1alpha1.OperationType_OPERATION_DELETE,
+				opType:     changelogs.OperationType_OPERATION_TYPE_DELETE,
 				errMessage: errBoom.Error(),
 			},
 		},
@@ -2678,7 +2678,7 @@ func TestRecordChangeLog(t *testing.T) {
 	}
 
 	type want struct {
-		entries []*protov1alpha1.ChangeLogEntry
+		entries []*changelogs.SendChangeLogRequest
 		events  []event.Event
 	}
 
@@ -2720,17 +2720,17 @@ func TestRecordChangeLog(t *testing.T) {
 				}},
 				err: errBoom,
 				ad:  &AdditionalDetails{"key": "value", "key2": map[string]int{"foo": 1, "bar": 2}},
-				c:   &changeLogServiceClient{enable: true, entries: []*protov1alpha1.ChangeLogEntry{}},
+				c:   &changeLogServiceClient{enable: true, entries: []*changelogs.SendChangeLogRequest{}},
 			},
 			want: want{
 				// a well fleshed out change log entry should be sent
-				entries: []*protov1alpha1.ChangeLogEntry{
+				entries: []*changelogs.SendChangeLogRequest{
 					{
 						Provider:     "provider-cool:v9.99.999",
 						Type:         (&fake.Managed{}).GetObjectKind().GroupVersionKind().String(),
 						Name:         "cool-managed",
 						ExternalName: "cool-managed",
-						Operation:    protov1alpha1.OperationType_OPERATION_CREATE,
+						Operation:    changelogs.OperationType_OPERATION_TYPE_CREATE,
 						Snapshot: mustObjectAsStruct(&fake.Managed{ObjectMeta: metav1.ObjectMeta{
 							Name:        "cool-managed",
 							Annotations: map[string]string{meta.AnnotationKeyExternalName: "cool-managed"},
@@ -2753,10 +2753,10 @@ func TestRecordChangeLog(t *testing.T) {
 				mr: &fake.Managed{},
 				c: &changeLogServiceClient{
 					enable:  true,
-					entries: []*protov1alpha1.ChangeLogEntry{},
+					entries: []*changelogs.SendChangeLogRequest{},
 					// make the send change log function return an error
-					sendFn: func(_ context.Context, _ *protov1alpha1.ChangeLogEntry, _ ...grpc.CallOption) (*protov1alpha1.ChangeLogResponse, error) {
-						return &protov1alpha1.ChangeLogResponse{Success: false, Message: "entry failed to send"}, errBoom
+					sendFn: func(_ context.Context, _ *changelogs.SendChangeLogRequest, _ ...grpc.CallOption) (*changelogs.SendChangeLogResponse, error) {
+						return &changelogs.SendChangeLogResponse{Success: false, Message: "entry failed to send"}, errBoom
 					},
 				},
 			},
@@ -2764,7 +2764,7 @@ func TestRecordChangeLog(t *testing.T) {
 				// we'll still see a change log entry, but it won't make it all
 				// the way to its destination and we should see an event for
 				// that failure
-				entries: []*protov1alpha1.ChangeLogEntry{
+				entries: []*changelogs.SendChangeLogRequest{
 					{
 						// we expect less fields to be set on the change log
 						// entry because we're not initializing the managed
@@ -2772,7 +2772,7 @@ func TestRecordChangeLog(t *testing.T) {
 						// test case
 						Provider:  "provider-cool:v9.99.999",
 						Type:      (&fake.Managed{}).GetObjectKind().GroupVersionKind().String(),
-						Operation: protov1alpha1.OperationType_OPERATION_CREATE,
+						Operation: changelogs.OperationType_OPERATION_TYPE_CREATE,
 						Snapshot:  mustObjectAsStruct(&fake.Managed{}),
 					},
 				},
@@ -2801,12 +2801,12 @@ func TestRecordChangeLog(t *testing.T) {
 			recorder := newMockRecorder()
 			snapshot := r.takeChangeLogSnapshot(tc.args.mr, logger, recorder)
 			r.recordChangeLog(context.Background(), tc.args.mr, snapshot, logger, recorder,
-				protov1alpha1.OperationType_OPERATION_CREATE, tc.args.err, tc.args.ad)
+				changelogs.OperationType_OPERATION_TYPE_CREATE, tc.args.err, tc.args.ad)
 
 			// we ignore unexported fields in the protobuf related types, we
 			// don't care much for the internals that cmp doesn't handle
 			// well. The exported fields are good enough.
-			ignoreUnexported := cmpopts.IgnoreUnexported(protov1alpha1.ChangeLogEntry{}, structpb.Struct{}, structpb.Value{})
+			ignoreUnexported := cmpopts.IgnoreUnexported(changelogs.SendChangeLogRequest{}, structpb.Struct{}, structpb.Value{})
 
 			if diff := cmp.Diff(tc.want.entries, tc.args.c.entries, ignoreUnexported); diff != "" {
 				t.Errorf("\nReason: %s\nr.recordChangeLog(...): -want entries, +got entries:\n%s", tc.reason, diff)
