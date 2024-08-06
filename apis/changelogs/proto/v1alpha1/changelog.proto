@@ -27,9 +27,15 @@ service ChangeLogService {
   rpc SendChangeLog (SendChangeLogRequest) returns (SendChangeLogResponse) {}
 }
 
-// SendChangeLogRequest represents a single change log entry, with detailed
-// information about the resource that was changed.
+// SendChangeLogRequest represents a request to send a single change log entry.
 message SendChangeLogRequest {
+  // The change log entry to send as part of this request.
+  ChangeLogEntry entry = 1;
+}
+
+// ChangeLog represents a single change log entry, with detailed information
+// about the resource that was changed.
+message ChangeLogEntry {
   // The name and version of the provider that is making the change to the
   // resource.
   string provider = 1;
@@ -57,7 +63,7 @@ message SendChangeLogRequest {
 
   // An optional additional details that can be provided for further context
   // about the change.
-  optional google.protobuf.Struct additional_details = 8;
+  map<string, string> additional_details = 8;
 }
 
 // OperationType represents the type of operation that was performed on a
@@ -69,13 +75,7 @@ enum OperationType {
   OPERATION_TYPE_DELETE = 3;
 }
 
-// SendChangeLogResponse is the response returned by the ChangeLogService after a
-// change log entry is sent.
-message SendChangeLogResponse {
-  // A boolean indicating whether the change log entry was successfully sent.
-  bool success = 1;
-
-  // A message that provides further information about the result of sending the
-  // change log entry.
-  string message = 2;
-}
+// SendChangeLogResponse is the response returned by the ChangeLogService after
+// a change log entry is sent. Currently, this is an empty message as the only
+// useful information expected to sent back at this time will be through errors.
+message SendChangeLogResponse {}

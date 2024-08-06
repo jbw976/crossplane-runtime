@@ -18,7 +18,6 @@ package managed
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"math/rand"
 	"strings"
@@ -147,7 +146,7 @@ type ConnectionDetails map[string][]byte
 // AdditionalDetails represent any additional details the external client wants
 // to return about an operation that has been performed. These details will be
 // included in the change logs.
-type AdditionalDetails map[string]any
+type AdditionalDetails map[string]string
 
 // A ConnectionPublisher manages the supplied ConnectionDetails for the
 // supplied Managed resource. ManagedPublishers must handle the case in which
@@ -343,7 +342,7 @@ type ExternalClient interface {
 
 	// Delete the external resource upon deletion of its associated Managed
 	// resource. Called when the managed resource has been deleted.
-	Delete(ctx context.Context, mg resource.Managed) error
+	Delete(ctx context.Context, mg resource.Managed) (ExternalDelete, error)
 
 	// Disconnect from the provider and close the ExternalClient.
 	// Called at the end of reconcile loop. An ExternalClient not requiring
@@ -358,7 +357,7 @@ type ExternalClientFns struct {
 	ObserveFn    func(ctx context.Context, mg resource.Managed) (ExternalObservation, error)
 	CreateFn     func(ctx context.Context, mg resource.Managed) (ExternalCreation, error)
 	UpdateFn     func(ctx context.Context, mg resource.Managed) (ExternalUpdate, error)
-	DeleteFn     func(ctx context.Context, mg resource.Managed) error
+	DeleteFn     func(ctx context.Context, mg resource.Managed) (ExternalDelete, error)
 	DisconnectFn func(ctx context.Context) error
 }
 
@@ -382,7 +381,7 @@ func (e ExternalClientFns) Update(ctx context.Context, mg resource.Managed) (Ext
 
 // Delete the external resource upon deletion of its associated Managed
 // resource.
-func (e ExternalClientFns) Delete(ctx context.Context, mg resource.Managed) error {
+func (e ExternalClientFns) Delete(ctx context.Context, mg resource.Managed) (ExternalDelete, error) {
 	return e.DeleteFn(ctx, mg)
 }
 
@@ -418,7 +417,9 @@ func (c *NopClient) Update(_ context.Context, _ resource.Managed) (ExternalUpdat
 }
 
 // Delete does nothing. It never returns an error.
-func (c *NopClient) Delete(_ context.Context, _ resource.Managed) error { return nil }
+func (c *NopClient) Delete(_ context.Context, _ resource.Managed) (ExternalDelete, error) {
+	return ExternalDelete{}, nil
+}
 
 // Disconnect does nothing. It never returns an error.
 func (c *NopClient) Disconnect(_ context.Context) error { return nil }
@@ -494,6 +495,13 @@ type ExternalUpdate struct {
 
 	// AdditionalDetails represent any additional details the external client
 	// wants to return about the update operation that was performed.
+	AdditionalDetails AdditionalDetails
+}
+
+// An ExternalDelete is the result of a deletion of an external resource.
+type ExternalDelete struct {
+	// AdditionalDetails represent any additional details the external client
+	// wants to return about the delete operation that was performed.
 	AdditionalDetails AdditionalDetails
 }
 
@@ -1011,7 +1019,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 		log = log.WithValues("deletion-timestamp", managed.GetDeletionTimestamp())
 
 		if observation.ResourceExists && policy.ShouldDelete() {
-			if err := external.Delete(externalCtx, managed); err != nil {
+			deletion, err := external.Delete(externalCtx, managed)
+			if err != nil {
 				// We'll hit this condition if we can't delete our external
 				// resource, for example if our provider credentials don't have
 				// access to delete it. If this is the first time we encounter
@@ -1019,7 +1028,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 				// status with the new error condition. If not, we want requeue
 				// explicitly, which will trigger backoff.
 				log.Debug("Cannot delete external resource", "error", err)
-				r.recordChangeLog(ctx, managed, snapshot, log, record, changelogs.OperationType_OPERATION_TYPE_DELETE, err, nil)
+				r.recordChangeLog(ctx, managed, snapshot, log, record, changelogs.OperationType_OPERATION_TYPE_DELETE, err, deletion.AdditionalDetails)
 				record.Event(managed, event.Warning(reasonCannotDelete, err))
 				managed.SetConditions(xpv1.Deleting(), xpv1.ReconcileError(errors.Wrap(err, errReconcileDelete)))
 				return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, managed), errUpdateManagedStatus)
@@ -1033,7 +1042,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 			// unpublish and finalize. If it still exists we'll re-enter this
 			// block and try again.
 			log.Debug("Successfully requested deletion of external resource")
-			r.recordChangeLog(ctx, managed, snapshot, log, record, changelogs.OperationType_OPERATION_TYPE_DELETE, nil, nil)
+			r.recordChangeLog(ctx, managed, snapshot, log, record, changelogs.OperationType_OPERATION_TYPE_DELETE, nil, deletion.AdditionalDetails)
 			record.Event(managed, event.Normal(reasonDeleted, "Successfully requested deletion of external resource"))
 			managed.SetConditions(xpv1.Deleting(), xpv1.ReconcileSuccess())
 			return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, managed), errUpdateManagedStatus)
@@ -1305,23 +1314,6 @@ func (r *Reconciler) recordChangeLog(ctx context.Context, managed resource.Manag
 		return
 	}
 
-	// convert any additional details to a Struct to include in the change log entry
-	var ads *structpb.Struct
-	if len(ad) > 0 {
-		b, err := json.Marshal(ad)
-		if err != nil {
-			log.Debug("Cannot marshal additional details", "error", err)
-			record.Event(managed, event.Warning(reasonCannotSendChangeLog, err))
-		} else {
-			ads = &structpb.Struct{}
-			if err = ads.UnmarshalJSON(b); err != nil {
-				log.Debug("Cannot convert additional details to Struct", "error", err)
-				record.Event(managed, event.Warning(reasonCannotSendChangeLog, err))
-				ads = nil
-			}
-		}
-	}
-
 	// determine the full namespaced name of the managed resource
 	var namespacedName string
 	namespace := managed.GetNamespace()
@@ -1339,14 +1331,16 @@ func (r *Reconciler) recordChangeLog(ctx context.Context, managed resource.Manag
 
 	// send everything we've got to the change log service
 	cle := &changelogs.SendChangeLogRequest{
-		Provider:          r.providerVersion,
-		Type:              managed.GetObjectKind().GroupVersionKind().String(),
-		Name:              namespacedName,
-		ExternalName:      meta.GetExternalName(managed),
-		Operation:         opType,
-		Snapshot:          snapshot,
-		ErrorMessage:      changeErrMessage,
-		AdditionalDetails: ads,
+		Entry: &changelogs.ChangeLogEntry{
+			Provider:          r.providerVersion,
+			Type:              managed.GetObjectKind().GroupVersionKind().String(),
+			Name:              namespacedName,
+			ExternalName:      meta.GetExternalName(managed),
+			Operation:         opType,
+			Snapshot:          snapshot,
+			ErrorMessage:      changeErrMessage,
+			AdditionalDetails: ad,
+		},
 	}
 
 	clr, err := r.changeLogClient.SendChangeLog(ctx, cle)

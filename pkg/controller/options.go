@@ -71,6 +71,10 @@ type Options struct {
 
 	// ChangeLogOptions for recording change logs.
 	ChangeLogOptions *ChangeLogOptions
+
+	// The identifier and version of the provider running this controller, e.g.
+	// "provider-cool-cloud:v1.0.0"
+	ProviderVersion string
 }
 
 // ForControllerRuntime extracts options for controller-runtime.
@@ -106,5 +110,4 @@ type MetricOptions struct {
 // logs.
 type ChangeLogOptions struct {
 	ChangeLogClient changelogs.ChangeLogServiceClient
-	ProviderVersion string
 }

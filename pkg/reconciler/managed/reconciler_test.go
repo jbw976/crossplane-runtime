@@ -18,7 +18,6 @@ package managed
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -437,8 +436,8 @@ func TestReconciler(t *testing.T) {
 							ObserveFn: func(_ context.Context, _ resource.Managed) (ExternalObservation, error) {
 								return ExternalObservation{ResourceExists: true}, nil
 							},
-							DeleteFn: func(_ context.Context, _ resource.Managed) error {
-								return errBoom
+							DeleteFn: func(_ context.Context, _ resource.Managed) (ExternalDelete, error) {
+								return ExternalDelete{}, errBoom
 							},
 							DisconnectFn: func(_ context.Context) error {
 								return nil
@@ -485,8 +484,8 @@ func TestReconciler(t *testing.T) {
 							ObserveFn: func(_ context.Context, _ resource.Managed) (ExternalObservation, error) {
 								return ExternalObservation{ResourceExists: true}, nil
 							},
-							DeleteFn: func(_ context.Context, _ resource.Managed) error {
-								return nil
+							DeleteFn: func(_ context.Context, _ resource.Managed) (ExternalDelete, error) {
+								return ExternalDelete{}, nil
 							},
 							DisconnectFn: func(_ context.Context) error {
 								return nil
@@ -2576,8 +2575,8 @@ func TestReconcilerChangeLogs(t *testing.T) {
 								// resource exists but we set a deletion timestamp above, which should trigger a delete operation
 								return ExternalObservation{ResourceExists: true}, nil
 							},
-							DeleteFn: func(_ context.Context, _ resource.Managed) error {
-								return nil
+							DeleteFn: func(_ context.Context, _ resource.Managed) (ExternalDelete, error) {
+								return ExternalDelete{}, nil
 							},
 							DisconnectFn: func(_ context.Context) error {
 								return nil
@@ -2619,9 +2618,9 @@ func TestReconcilerChangeLogs(t *testing.T) {
 								// resource exists but we set a deletion timestamp above, which should trigger a delete operation
 								return ExternalObservation{ResourceExists: true}, nil
 							},
-							DeleteFn: func(_ context.Context, _ resource.Managed) error {
+							DeleteFn: func(_ context.Context, _ resource.Managed) (ExternalDelete, error) {
 								// return an error from Delete to simulate a failed delete
-								return errBoom
+								return ExternalDelete{}, errBoom
 							},
 							DisconnectFn: func(_ context.Context) error {
 								return nil
@@ -2654,11 +2653,11 @@ func TestReconcilerChangeLogs(t *testing.T) {
 			}
 
 			if tc.want.callCount > 0 {
-				if diff := cmp.Diff(tc.want.opType, tc.args.c.entries[0].GetOperation()); diff != "" {
+				if diff := cmp.Diff(tc.want.opType, tc.args.c.entries[0].GetEntry().GetOperation()); diff != "" {
 					t.Errorf("\nReason: %s\nr.Reconcile(...): -want opType, +got opType:\n%s", tc.reason, diff)
 				}
 
-				if diff := cmp.Diff(tc.want.errMessage, tc.args.c.entries[0].GetErrorMessage()); diff != "" {
+				if diff := cmp.Diff(tc.want.errMessage, tc.args.c.entries[0].GetEntry().GetErrorMessage()); diff != "" {
 					t.Errorf("\nReason: %s\nr.Reconcile(...): -want errMessage, +got errMessage:\n%s", tc.reason, diff)
 				}
 			}
@@ -2719,24 +2718,26 @@ func TestRecordChangeLog(t *testing.T) {
 					Annotations: map[string]string{meta.AnnotationKeyExternalName: "cool-managed"},
 				}},
 				err: errBoom,
-				ad:  AdditionalDetails{"key": "value", "key2": map[string]int{"foo": 1, "bar": 2}},
+				ad:  AdditionalDetails{"key": "value", "key2": "value2"},
 				c:   &changeLogServiceClient{enable: true, entries: []*changelogs.SendChangeLogRequest{}},
 			},
 			want: want{
 				// a well fleshed out change log entry should be sent
 				entries: []*changelogs.SendChangeLogRequest{
 					{
-						Provider:     "provider-cool:v9.99.999",
-						Type:         (&fake.Managed{}).GetObjectKind().GroupVersionKind().String(),
-						Name:         "cool-managed",
-						ExternalName: "cool-managed",
-						Operation:    changelogs.OperationType_OPERATION_TYPE_CREATE,
-						Snapshot: mustObjectAsProtobufStruct(&fake.Managed{ObjectMeta: metav1.ObjectMeta{
-							Name:        "cool-managed",
-							Annotations: map[string]string{meta.AnnotationKeyExternalName: "cool-managed"},
-						}}),
-						ErrorMessage:      reference.ToPtrValue("boom"),
-						AdditionalDetails: mustAdditionalDetailsAsProtobufStruct(AdditionalDetails{"key": "value", "key2": map[string]int{"foo": 1, "bar": 2}}),
+						Entry: &changelogs.ChangeLogEntry{
+							Provider:     "provider-cool:v9.99.999",
+							Type:         (&fake.Managed{}).GetObjectKind().GroupVersionKind().String(),
+							Name:         "cool-managed",
+							ExternalName: "cool-managed",
+							Operation:    changelogs.OperationType_OPERATION_TYPE_CREATE,
+							Snapshot: mustObjectAsProtobufStruct(&fake.Managed{ObjectMeta: metav1.ObjectMeta{
+								Name:        "cool-managed",
+								Annotations: map[string]string{meta.AnnotationKeyExternalName: "cool-managed"},
+							}}),
+							ErrorMessage:      reference.ToPtrValue("boom"),
+							AdditionalDetails: AdditionalDetails{"key": "value", "key2": "value2"},
+						},
 					},
 				},
 			},
@@ -2756,7 +2757,7 @@ func TestRecordChangeLog(t *testing.T) {
 					entries: []*changelogs.SendChangeLogRequest{},
 					// make the send change log function return an error
 					sendFn: func(_ context.Context, _ *changelogs.SendChangeLogRequest, _ ...grpc.CallOption) (*changelogs.SendChangeLogResponse, error) {
-						return &changelogs.SendChangeLogResponse{Success: false, Message: "entry failed to send"}, errBoom
+						return &changelogs.SendChangeLogResponse{}, errBoom
 					},
 				},
 			},
@@ -2766,14 +2767,16 @@ func TestRecordChangeLog(t *testing.T) {
 				// that failure
 				entries: []*changelogs.SendChangeLogRequest{
 					{
-						// we expect less fields to be set on the change log
-						// entry because we're not initializing the managed
-						// resource with much data in this simulated failure
-						// test case
-						Provider:  "provider-cool:v9.99.999",
-						Type:      (&fake.Managed{}).GetObjectKind().GroupVersionKind().String(),
-						Operation: changelogs.OperationType_OPERATION_TYPE_CREATE,
-						Snapshot:  mustObjectAsProtobufStruct(&fake.Managed{}),
+						Entry: &changelogs.ChangeLogEntry{
+							// we expect less fields to be set on the change log
+							// entry because we're not initializing the managed
+							// resource with much data in this simulated failure
+							// test case
+							Provider:  "provider-cool:v9.99.999",
+							Type:      (&fake.Managed{}).GetObjectKind().GroupVersionKind().String(),
+							Operation: changelogs.OperationType_OPERATION_TYPE_CREATE,
+							Snapshot:  mustObjectAsProtobufStruct(&fake.Managed{}),
+						},
 					},
 				},
 				events: []event.Event{
@@ -2806,7 +2809,11 @@ func TestRecordChangeLog(t *testing.T) {
 			// we ignore unexported fields in the protobuf related types, we
 			// don't care much for the internals that cmp doesn't handle
 			// well. The exported fields are good enough.
-			ignoreUnexported := cmpopts.IgnoreUnexported(changelogs.SendChangeLogRequest{}, structpb.Struct{}, structpb.Value{})
+			ignoreUnexported := cmpopts.IgnoreUnexported(
+				changelogs.SendChangeLogRequest{},
+				changelogs.ChangeLogEntry{},
+				structpb.Struct{},
+				structpb.Value{})
 
 			if diff := cmp.Diff(tc.want.entries, tc.args.c.entries, ignoreUnexported); diff != "" {
 				t.Errorf("\nReason: %s\nr.recordChangeLog(...): -want entries, +got entries:\n%s", tc.reason, diff)
@@ -2840,17 +2847,4 @@ func mustObjectAsProtobufStruct(o runtime.Object) *structpb.Struct {
 		panic(err)
 	}
 	return s
-}
-
-func mustAdditionalDetailsAsProtobufStruct(ad AdditionalDetails) *structpb.Struct {
-	b, err := json.Marshal(ad)
-	if err != nil {
-		panic(err)
-	}
-
-	ads := &structpb.Struct{}
-	if err = ads.UnmarshalJSON(b); err != nil {
-		panic(err)
-	}
-	return ads
 }
