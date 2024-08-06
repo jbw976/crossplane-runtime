@@ -434,13 +434,11 @@ func StableNAndSomeMore(n int, names []string) string {
 	return FirstNAndSomeMore(n, cpy)
 }
 
-// AsStruct converts the given object to a structpb.Struct for usage with gRPC
+// AsProtobufStruct converts the given object to a structpb.Struct for usage with gRPC
 // connections.
-// Copied from Crossplane's internal composite controller package
-// "github.com/crossplane/crossplane/internal/controller/apiextensions/composite"
-// Source code at:
+// Copied from:
 // https://github.com/crossplane/crossplane/blob/release-1.16/internal/controller/apiextensions/composite/composition_functions.go#L761
-func AsStruct(o runtime.Object) (*structpb.Struct, error) {
+func AsProtobufStruct(o runtime.Object) (*structpb.Struct, error) {
 	// If the supplied object is *Unstructured we don't need to round-trip.
 	if u, ok := o.(*kunstructured.Unstructured); ok {
 		s, err := structpb.NewStruct(u.Object)

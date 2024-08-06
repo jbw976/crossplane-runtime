@@ -2672,7 +2672,7 @@ func TestRecordChangeLog(t *testing.T) {
 		mg  resource.ManagedKind
 		o   []ReconcilerOption
 		mr  resource.Managed
-		ad  *AdditionalDetails
+		ad  AdditionalDetails
 		err error
 		c   *changeLogServiceClient
 	}
@@ -2719,7 +2719,7 @@ func TestRecordChangeLog(t *testing.T) {
 					Annotations: map[string]string{meta.AnnotationKeyExternalName: "cool-managed"},
 				}},
 				err: errBoom,
-				ad:  &AdditionalDetails{"key": "value", "key2": map[string]int{"foo": 1, "bar": 2}},
+				ad:  AdditionalDetails{"key": "value", "key2": map[string]int{"foo": 1, "bar": 2}},
 				c:   &changeLogServiceClient{enable: true, entries: []*changelogs.SendChangeLogRequest{}},
 			},
 			want: want{
@@ -2731,12 +2731,12 @@ func TestRecordChangeLog(t *testing.T) {
 						Name:         "cool-managed",
 						ExternalName: "cool-managed",
 						Operation:    changelogs.OperationType_OPERATION_TYPE_CREATE,
-						Snapshot: mustObjectAsStruct(&fake.Managed{ObjectMeta: metav1.ObjectMeta{
+						Snapshot: mustObjectAsProtobufStruct(&fake.Managed{ObjectMeta: metav1.ObjectMeta{
 							Name:        "cool-managed",
 							Annotations: map[string]string{meta.AnnotationKeyExternalName: "cool-managed"},
 						}}),
 						ErrorMessage:      reference.ToPtrValue("boom"),
-						AdditionalDetails: mustAdditionalDetailsAsStruct(&AdditionalDetails{"key": "value", "key2": map[string]int{"foo": 1, "bar": 2}}),
+						AdditionalDetails: mustAdditionalDetailsAsProtobufStruct(AdditionalDetails{"key": "value", "key2": map[string]int{"foo": 1, "bar": 2}}),
 					},
 				},
 			},
@@ -2773,7 +2773,7 @@ func TestRecordChangeLog(t *testing.T) {
 						Provider:  "provider-cool:v9.99.999",
 						Type:      (&fake.Managed{}).GetObjectKind().GroupVersionKind().String(),
 						Operation: changelogs.OperationType_OPERATION_TYPE_CREATE,
-						Snapshot:  mustObjectAsStruct(&fake.Managed{}),
+						Snapshot:  mustObjectAsProtobufStruct(&fake.Managed{}),
 					},
 				},
 				events: []event.Event{
@@ -2834,15 +2834,15 @@ func (r *mockRecorder) Event(_ runtime.Object, e event.Event) {
 
 func (r *mockRecorder) WithAnnotations(_ ...string) event.Recorder { return r }
 
-func mustObjectAsStruct(o runtime.Object) *structpb.Struct {
-	s, err := resource.AsStruct(o)
+func mustObjectAsProtobufStruct(o runtime.Object) *structpb.Struct {
+	s, err := resource.AsProtobufStruct(o)
 	if err != nil {
 		panic(err)
 	}
 	return s
 }
 
-func mustAdditionalDetailsAsStruct(ad *AdditionalDetails) *structpb.Struct {
+func mustAdditionalDetailsAsProtobufStruct(ad AdditionalDetails) *structpb.Struct {
 	b, err := json.Marshal(ad)
 	if err != nil {
 		panic(err)

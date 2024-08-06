@@ -480,7 +480,7 @@ type ExternalCreation struct {
 
 	// AdditionalDetails represent any additional details the external client
 	// wants to return about the creation operation that was performed.
-	AdditionalDetails *AdditionalDetails
+	AdditionalDetails AdditionalDetails
 }
 
 // An ExternalUpdate is the result of an update to an external resource.
@@ -494,7 +494,7 @@ type ExternalUpdate struct {
 
 	// AdditionalDetails represent any additional details the external client
 	// wants to return about the update operation that was performed.
-	AdditionalDetails *AdditionalDetails
+	AdditionalDetails AdditionalDetails
 }
 
 // A Reconciler reconciles managed resources by creating and managing the
@@ -723,11 +723,11 @@ func WithReconcilerSupportedManagementPolicies(supported []sets.Set[xpv1.Managem
 
 // WithChangeLogs enables support for capturing change logs during
 // reconciliation.
-func WithChangeLogs(c changelogs.ChangeLogServiceClient, pv string) ReconcilerOption {
+func WithChangeLogs(c changelogs.ChangeLogServiceClient, providerVersion string) ReconcilerOption {
 	return func(r *Reconciler) {
 		r.features.Enable(feature.EnableAlphaChangeLogs)
 		r.changeLogClient = c
-		r.providerVersion = pv
+		r.providerVersion = providerVersion
 	}
 }
 
@@ -1298,7 +1298,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 // each, but the process will continue. We are choosing to send all the
 // information we can to the change logs as opposed to sending nothing.
 func (r *Reconciler) recordChangeLog(ctx context.Context, managed resource.Managed, snapshot *structpb.Struct, log logging.Logger,
-	record event.Recorder, opType changelogs.OperationType, changeErr error, ad *AdditionalDetails,
+	record event.Recorder, opType changelogs.OperationType, changeErr error, ad AdditionalDetails,
 ) {
 	if !r.features.Enabled(feature.EnableAlphaChangeLogs) {
 		// change log feature isn't enabled, just return immediately
@@ -1307,7 +1307,7 @@ func (r *Reconciler) recordChangeLog(ctx context.Context, managed resource.Manag
 
 	// convert any additional details to a Struct to include in the change log entry
 	var ads *structpb.Struct
-	if ad != nil {
+	if len(ad) > 0 {
 		b, err := json.Marshal(ad)
 		if err != nil {
 			log.Debug("Cannot marshal additional details", "error", err)
@@ -1371,7 +1371,7 @@ func (r *Reconciler) takeChangeLogSnapshot(managed resource.Managed, log logging
 	}
 
 	// capture the full state of the managed resource from before we performed the change
-	snapshot, err := resource.AsStruct(managed)
+	snapshot, err := resource.AsProtobufStruct(managed)
 	if err != nil {
 		log.Debug("Cannot snapshot managed resource", "error", err)
 		record.Event(managed, event.Warning(reasonCannotSendChangeLog, err))
