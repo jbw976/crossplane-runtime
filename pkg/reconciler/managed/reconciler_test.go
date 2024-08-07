@@ -2727,7 +2727,8 @@ func TestRecordChangeLog(t *testing.T) {
 					{
 						Entry: &changelogs.ChangeLogEntry{
 							Provider:     "provider-cool:v9.99.999",
-							Type:         (&fake.Managed{}).GetObjectKind().GroupVersionKind().String(),
+							ApiVersion:   (&fake.Managed{}).GetObjectKind().GroupVersionKind().GroupVersion().String(),
+							Kind:         (&fake.Managed{}).GetObjectKind().GroupVersionKind().Kind,
 							Name:         "cool-managed",
 							ExternalName: "cool-managed",
 							Operation:    changelogs.OperationType_OPERATION_TYPE_CREATE,
@@ -2772,10 +2773,11 @@ func TestRecordChangeLog(t *testing.T) {
 							// entry because we're not initializing the managed
 							// resource with much data in this simulated failure
 							// test case
-							Provider:  "provider-cool:v9.99.999",
-							Type:      (&fake.Managed{}).GetObjectKind().GroupVersionKind().String(),
-							Operation: changelogs.OperationType_OPERATION_TYPE_CREATE,
-							Snapshot:  mustObjectAsProtobufStruct(&fake.Managed{}),
+							Provider:   "provider-cool:v9.99.999",
+							ApiVersion: (&fake.Managed{}).GetObjectKind().GroupVersionKind().GroupVersion().String(),
+							Kind:       (&fake.Managed{}).GetObjectKind().GroupVersionKind().Kind,
+							Operation:  changelogs.OperationType_OPERATION_TYPE_CREATE,
+							Snapshot:   mustObjectAsProtobufStruct(&fake.Managed{}),
 						},
 					},
 				},

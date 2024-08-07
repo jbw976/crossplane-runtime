@@ -1329,11 +1329,14 @@ func (r *Reconciler) recordChangeLog(ctx context.Context, managed resource.Manag
 		changeErrMessage = reference.ToPtrValue(changeErr.Error())
 	}
 
+	gvk := managed.GetObjectKind().GroupVersionKind()
+
 	// send everything we've got to the change log service
 	cle := &changelogs.SendChangeLogRequest{
 		Entry: &changelogs.ChangeLogEntry{
 			Provider:          r.providerVersion,
-			Type:              managed.GetObjectKind().GroupVersionKind().String(),
+			ApiVersion:        gvk.GroupVersion().String(),
+			Kind:              gvk.Kind,
 			Name:              namespacedName,
 			ExternalName:      meta.GetExternalName(managed),
 			Operation:         opType,

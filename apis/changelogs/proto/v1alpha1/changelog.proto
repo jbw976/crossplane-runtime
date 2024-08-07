@@ -33,37 +33,40 @@ message SendChangeLogRequest {
   ChangeLogEntry entry = 1;
 }
 
-// ChangeLog represents a single change log entry, with detailed information
+// ChangeLogEntry represents a single change log entry, with detailed information
 // about the resource that was changed.
 message ChangeLogEntry {
   // The name and version of the provider that is making the change to the
   // resource.
   string provider = 1;
 
-  // The type of the resource that was changed, e.g. Group, Version, Kind.
-  string type = 2;
+  // The API version of the resource that was changed, e.g. Group/Version.
+  string api_version = 2;
+
+  // The kind of the resource that was changed.
+  string kind = 3;
 
   // The name of the resource that was changed.
-  string name = 3;
+  string name = 4;
 
   // The external name of the resource that was changed.
-  string external_name = 4;
+  string external_name = 5;
 
   // The type of operation that was performed on the resource, e.g. Create,
   // Update, or Delete.
-  OperationType operation = 5;
+  OperationType operation = 6;
 
   // A full snapshot of the resource's state, as observed directly before the
   // resource was changed.
-  google.protobuf.Struct snapshot = 6;
+  google.protobuf.Struct snapshot = 7;
 
   // An optional error message that describes any error encountered while
   // performing the operation on the resource.
-  optional string error_message = 7;
+  optional string error_message = 8;
 
   // An optional additional details that can be provided for further context
   // about the change.
-  map<string, string> additional_details = 8;
+  map<string, string> additional_details = 9;
 }
 
 // OperationType represents the type of operation that was performed on a
