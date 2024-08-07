@@ -24,11 +24,8 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"google.golang.org/grpc"
-	"google.golang.org/protobuf/types/known/structpb"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -38,10 +35,7 @@ import (
 	changelogs "github.com/crossplane/crossplane-runtime/apis/changelogs/proto/v1alpha1"
 	xpv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
 	"github.com/crossplane/crossplane-runtime/pkg/errors"
-	"github.com/crossplane/crossplane-runtime/pkg/event"
-	"github.com/crossplane/crossplane-runtime/pkg/logging"
 	"github.com/crossplane/crossplane-runtime/pkg/meta"
-	"github.com/crossplane/crossplane-runtime/pkg/reference"
 	"github.com/crossplane/crossplane-runtime/pkg/resource"
 	"github.com/crossplane/crossplane-runtime/pkg/resource/fake"
 	"github.com/crossplane/crossplane-runtime/pkg/test"
@@ -2326,22 +2320,6 @@ func TestShouldDelete(t *testing.T) {
 	}
 }
 
-// A mock implementation of the ChangeLogServiceClient interface to help with
-// testing and verifying change log entries.
-type changeLogServiceClient struct {
-	enable  bool
-	entries []*changelogs.SendChangeLogRequest
-	sendFn  func(ctx context.Context, in *changelogs.SendChangeLogRequest, opts ...grpc.CallOption) (*changelogs.SendChangeLogResponse, error)
-}
-
-func (c *changeLogServiceClient) SendChangeLog(ctx context.Context, in *changelogs.SendChangeLogRequest, opts ...grpc.CallOption) (*changelogs.SendChangeLogResponse, error) {
-	c.entries = append(c.entries, in)
-	if c.sendFn != nil {
-		return c.sendFn(ctx, in, opts...)
-	}
-	return nil, nil
-}
-
 func TestReconcilerChangeLogs(t *testing.T) {
 	type args struct {
 		m  manager.Manager
@@ -2648,205 +2626,19 @@ func TestReconcilerChangeLogs(t *testing.T) {
 			r := NewReconciler(tc.args.m, tc.args.mg, tc.args.o...)
 			r.Reconcile(context.Background(), reconcile.Request{})
 
-			if diff := cmp.Diff(tc.want.callCount, len(tc.args.c.entries)); diff != "" {
+			if diff := cmp.Diff(tc.want.callCount, len(tc.args.c.requests)); diff != "" {
 				t.Errorf("\nReason: %s\nr.Reconcile(...): -want callCount, +got callCount:\n%s", tc.reason, diff)
 			}
 
 			if tc.want.callCount > 0 {
-				if diff := cmp.Diff(tc.want.opType, tc.args.c.entries[0].GetEntry().GetOperation()); diff != "" {
+				if diff := cmp.Diff(tc.want.opType, tc.args.c.requests[0].GetEntry().GetOperation()); diff != "" {
 					t.Errorf("\nReason: %s\nr.Reconcile(...): -want opType, +got opType:\n%s", tc.reason, diff)
 				}
 
-				if diff := cmp.Diff(tc.want.errMessage, tc.args.c.entries[0].GetEntry().GetErrorMessage()); diff != "" {
+				if diff := cmp.Diff(tc.want.errMessage, tc.args.c.requests[0].GetEntry().GetErrorMessage()); diff != "" {
 					t.Errorf("\nReason: %s\nr.Reconcile(...): -want errMessage, +got errMessage:\n%s", tc.reason, diff)
 				}
 			}
 		})
 	}
-}
-
-func TestRecordChangeLog(t *testing.T) {
-	type args struct {
-		m   manager.Manager
-		mg  resource.ManagedKind
-		o   []ReconcilerOption
-		mr  resource.Managed
-		ad  AdditionalDetails
-		err error
-		c   *changeLogServiceClient
-	}
-
-	type want struct {
-		entries []*changelogs.SendChangeLogRequest
-		events  []event.Event
-	}
-
-	errBoom := errors.New("boom")
-
-	cases := map[string]struct {
-		reason string
-		args   args
-		want   want
-	}{
-		"ChangeLogsNotEnabled": {
-			reason: "No change logs should be recorded when change logs are not enabled.",
-			args: args{
-				m: &fake.Manager{
-					Client: &test.MockClient{},
-					Scheme: fake.SchemeWith(&fake.Managed{}),
-				},
-				mg: resource.ManagedKind(fake.GVK(&fake.Managed{})),
-				o:  []ReconcilerOption{},
-				// disable change logs for this test case
-				c: &changeLogServiceClient{enable: false, entries: nil},
-			},
-			want: want{
-				entries: nil, // no change logs should be sent
-			},
-		},
-		"ChangeLogsEnabled": {
-			reason: "Change log entry should be recorded when change logs are enabled.",
-			args: args{
-				m: &fake.Manager{
-					Client: &test.MockClient{},
-					Scheme: fake.SchemeWith(&fake.Managed{}),
-				},
-				mg: resource.ManagedKind(fake.GVK(&fake.Managed{})),
-				o:  []ReconcilerOption{},
-				mr: &fake.Managed{ObjectMeta: metav1.ObjectMeta{
-					Name:        "cool-managed",
-					Annotations: map[string]string{meta.AnnotationKeyExternalName: "cool-managed"},
-				}},
-				err: errBoom,
-				ad:  AdditionalDetails{"key": "value", "key2": "value2"},
-				c:   &changeLogServiceClient{enable: true, entries: []*changelogs.SendChangeLogRequest{}},
-			},
-			want: want{
-				// a well fleshed out change log entry should be sent
-				entries: []*changelogs.SendChangeLogRequest{
-					{
-						Entry: &changelogs.ChangeLogEntry{
-							Provider:     "provider-cool:v9.99.999",
-							ApiVersion:   (&fake.Managed{}).GetObjectKind().GroupVersionKind().GroupVersion().String(),
-							Kind:         (&fake.Managed{}).GetObjectKind().GroupVersionKind().Kind,
-							Name:         "cool-managed",
-							ExternalName: "cool-managed",
-							Operation:    changelogs.OperationType_OPERATION_TYPE_CREATE,
-							Snapshot: mustObjectAsProtobufStruct(&fake.Managed{ObjectMeta: metav1.ObjectMeta{
-								Name:        "cool-managed",
-								Annotations: map[string]string{meta.AnnotationKeyExternalName: "cool-managed"},
-							}}),
-							ErrorMessage:      reference.ToPtrValue("boom"),
-							AdditionalDetails: AdditionalDetails{"key": "value", "key2": "value2"},
-						},
-					},
-				},
-			},
-		},
-		"SendChangeLogsFailure": {
-			reason: "Error from sending change log entry should be handled and recorded.",
-			args: args{
-				m: &fake.Manager{
-					Client: &test.MockClient{},
-					Scheme: fake.SchemeWith(&fake.Managed{}),
-				},
-				mg: resource.ManagedKind(fake.GVK(&fake.Managed{})),
-				o:  []ReconcilerOption{},
-				mr: &fake.Managed{},
-				c: &changeLogServiceClient{
-					enable:  true,
-					entries: []*changelogs.SendChangeLogRequest{},
-					// make the send change log function return an error
-					sendFn: func(_ context.Context, _ *changelogs.SendChangeLogRequest, _ ...grpc.CallOption) (*changelogs.SendChangeLogResponse, error) {
-						return &changelogs.SendChangeLogResponse{}, errBoom
-					},
-				},
-			},
-			want: want{
-				// we'll still see a change log entry, but it won't make it all
-				// the way to its destination and we should see an event for
-				// that failure
-				entries: []*changelogs.SendChangeLogRequest{
-					{
-						Entry: &changelogs.ChangeLogEntry{
-							// we expect less fields to be set on the change log
-							// entry because we're not initializing the managed
-							// resource with much data in this simulated failure
-							// test case
-							Provider:   "provider-cool:v9.99.999",
-							ApiVersion: (&fake.Managed{}).GetObjectKind().GroupVersionKind().GroupVersion().String(),
-							Kind:       (&fake.Managed{}).GetObjectKind().GroupVersionKind().Kind,
-							Operation:  changelogs.OperationType_OPERATION_TYPE_CREATE,
-							Snapshot:   mustObjectAsProtobufStruct(&fake.Managed{}),
-						},
-					},
-				},
-				events: []event.Event{
-					{
-						// we do expect an event to be recorded for the send failure
-						Type:        event.TypeWarning,
-						Reason:      reasonCannotSendChangeLog,
-						Message:     errBoom.Error(),
-						Annotations: map[string]string{},
-					},
-				},
-			},
-		},
-	}
-
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			if tc.args.c.enable {
-				// enable change logs with the given test client
-				tc.args.o = append(tc.args.o, WithChangeLogs(tc.args.c, "provider-cool:v9.99.999"))
-			}
-
-			r := NewReconciler(tc.args.m, tc.args.mg, tc.args.o...)
-			logger := logging.NewNopLogger()
-			recorder := newMockRecorder()
-			snapshot := r.takeChangeLogSnapshot(tc.args.mr, logger, recorder)
-			r.recordChangeLog(context.Background(), tc.args.mr, snapshot, logger, recorder,
-				changelogs.OperationType_OPERATION_TYPE_CREATE, tc.args.err, tc.args.ad)
-
-			// we ignore unexported fields in the protobuf related types, we
-			// don't care much for the internals that cmp doesn't handle
-			// well. The exported fields are good enough.
-			ignoreUnexported := cmpopts.IgnoreUnexported(
-				changelogs.SendChangeLogRequest{},
-				changelogs.ChangeLogEntry{},
-				structpb.Struct{},
-				structpb.Value{})
-
-			if diff := cmp.Diff(tc.want.entries, tc.args.c.entries, ignoreUnexported); diff != "" {
-				t.Errorf("\nReason: %s\nr.recordChangeLog(...): -want entries, +got entries:\n%s", tc.reason, diff)
-			}
-
-			if diff := cmp.Diff(tc.want.events, recorder.events); diff != "" {
-				t.Errorf("\nReason: %s\nr.recordChangeLog(...): -want events, +got events:\n%s", tc.reason, diff)
-			}
-		})
-	}
-}
-
-// mockRecorder will record events seen during the test cases.
-type mockRecorder struct {
-	events []event.Event
-}
-
-func newMockRecorder() *mockRecorder {
-	return &mockRecorder{}
-}
-
-func (r *mockRecorder) Event(_ runtime.Object, e event.Event) {
-	r.events = append(r.events, e)
-}
-
-func (r *mockRecorder) WithAnnotations(_ ...string) event.Recorder { return r }
-
-func mustObjectAsProtobufStruct(o runtime.Object) *structpb.Struct {
-	s, err := resource.AsProtobufStruct(o)
-	if err != nil {
-		panic(err)
-	}
-	return s
 }

@@ -18,12 +18,10 @@ package managed
 
 import (
 	"context"
-	"fmt"
 	"math/rand"
 	"strings"
 	"time"
 
-	"google.golang.org/protobuf/types/known/structpb"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -38,7 +36,6 @@ import (
 	"github.com/crossplane/crossplane-runtime/pkg/feature"
 	"github.com/crossplane/crossplane-runtime/pkg/logging"
 	"github.com/crossplane/crossplane-runtime/pkg/meta"
-	"github.com/crossplane/crossplane-runtime/pkg/reference"
 	"github.com/crossplane/crossplane-runtime/pkg/resource"
 )
 
@@ -1013,7 +1010,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 
 	// take a snapshot of the managed resource now that we've called Observe()
 	// and have not performed any external operations
-	snapshot := r.takeChangeLogSnapshot(managed, log, record)
+	changeLogger := newChangeLogger(r.features.Enabled(feature.EnableAlphaChangeLogs), r.changeLogClient, log, record, r.providerVersion)
+	changeLogger.takeSnapshot(managed)
 
 	if meta.WasDeleted(managed) {
 		log = log.WithValues("deletion-timestamp", managed.GetDeletionTimestamp())
@@ -1028,7 +1026,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 				// status with the new error condition. If not, we want requeue
 				// explicitly, which will trigger backoff.
 				log.Debug("Cannot delete external resource", "error", err)
-				r.recordChangeLog(ctx, managed, snapshot, log, record, changelogs.OperationType_OPERATION_TYPE_DELETE, err, deletion.AdditionalDetails)
+				entry := changeLogger.newChangeLogEntry(managed, changelogs.OperationType_OPERATION_TYPE_DELETE, err, deletion.AdditionalDetails)
+				changeLogger.recordChangeLog(ctx, managed, entry)
 				record.Event(managed, event.Warning(reasonCannotDelete, err))
 				managed.SetConditions(xpv1.Deleting(), xpv1.ReconcileError(errors.Wrap(err, errReconcileDelete)))
 				return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, managed), errUpdateManagedStatus)
@@ -1042,7 +1041,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 			// unpublish and finalize. If it still exists we'll re-enter this
 			// block and try again.
 			log.Debug("Successfully requested deletion of external resource")
-			r.recordChangeLog(ctx, managed, snapshot, log, record, changelogs.OperationType_OPERATION_TYPE_DELETE, nil, deletion.AdditionalDetails)
+			entry := changeLogger.newChangeLogEntry(managed, changelogs.OperationType_OPERATION_TYPE_DELETE, nil, deletion.AdditionalDetails)
+			changeLogger.recordChangeLog(ctx, managed, entry)
 			record.Event(managed, event.Normal(reasonDeleted, "Successfully requested deletion of external resource"))
 			managed.SetConditions(xpv1.Deleting(), xpv1.ReconcileSuccess())
 			return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, managed), errUpdateManagedStatus)
@@ -1156,7 +1156,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 				// create failed.
 			}
 
-			r.recordChangeLog(ctx, managed, snapshot, log, record, changelogs.OperationType_OPERATION_TYPE_CREATE, err, creation.AdditionalDetails)
+			entry := changeLogger.newChangeLogEntry(managed, changelogs.OperationType_OPERATION_TYPE_CREATE, err, creation.AdditionalDetails)
+			changeLogger.recordChangeLog(ctx, managed, entry)
 			managed.SetConditions(xpv1.Creating(), xpv1.ReconcileError(errors.Wrap(err, errReconcileCreate)))
 			return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, managed), errUpdateManagedStatus)
 		}
@@ -1165,7 +1166,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 		log = log.WithValues("external-name", meta.GetExternalName(managed))
 		record = r.record.WithAnnotations("external-name", meta.GetExternalName(managed))
 
-		r.recordChangeLog(ctx, managed, snapshot, log, record, changelogs.OperationType_OPERATION_TYPE_CREATE, nil, creation.AdditionalDetails)
+		entry := changeLogger.newChangeLogEntry(managed, changelogs.OperationType_OPERATION_TYPE_CREATE, nil, creation.AdditionalDetails)
+		changeLogger.recordChangeLog(ctx, managed, entry)
 
 		// We handle annotations specially here because it's critical
 		// that they are persisted to the API server. If we don't remove
@@ -1268,7 +1270,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 		// requeued implicitly when we update our status with the new error
 		// condition. If not, we requeue explicitly, which will trigger backoff.
 		log.Debug("Cannot update external resource")
-		r.recordChangeLog(ctx, managed, snapshot, log, record, changelogs.OperationType_OPERATION_TYPE_UPDATE, err, update.AdditionalDetails)
+		entry := changeLogger.newChangeLogEntry(managed, changelogs.OperationType_OPERATION_TYPE_UPDATE, err, update.AdditionalDetails)
+		changeLogger.recordChangeLog(ctx, managed, entry)
 		record.Event(managed, event.Warning(reasonCannotUpdate, err))
 		managed.SetConditions(xpv1.ReconcileError(errors.Wrap(err, errReconcileUpdate)))
 		return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, managed), errUpdateManagedStatus)
@@ -1277,7 +1280,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 	// record the drift after the successful update.
 	r.metricRecorder.recordDrift(managed)
 
-	r.recordChangeLog(ctx, managed, snapshot, log, record, changelogs.OperationType_OPERATION_TYPE_UPDATE, nil, update.AdditionalDetails)
+	entry := changeLogger.newChangeLogEntry(managed, changelogs.OperationType_OPERATION_TYPE_UPDATE, nil, update.AdditionalDetails)
+	changeLogger.recordChangeLog(ctx, managed, entry)
 
 	if _, err := r.managed.PublishConnection(ctx, managed, update.ConnectionDetails); err != nil {
 		// If this is the first time we encounter this issue we'll be requeued
@@ -1299,81 +1303,4 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 	record.Event(managed, event.Normal(reasonUpdated, "Successfully requested update of external resource"))
 	managed.SetConditions(xpv1.ReconcileSuccess())
 	return reconcile.Result{RequeueAfter: reconcileAfter}, errors.Wrap(r.client.Status().Update(ctx, managed), errUpdateManagedStatus)
-}
-
-// recordChangeLog constructs a change log entry from the provided information
-// and sends it to the change log service, if the feature is enabled. If errors
-// are encountered during this process, then logs/events will be recorded for
-// each, but the process will continue. We are choosing to send all the
-// information we can to the change logs as opposed to sending nothing.
-func (r *Reconciler) recordChangeLog(ctx context.Context, managed resource.Managed, snapshot *structpb.Struct, log logging.Logger,
-	record event.Recorder, opType changelogs.OperationType, changeErr error, ad AdditionalDetails,
-) {
-	if !r.features.Enabled(feature.EnableAlphaChangeLogs) {
-		// change log feature isn't enabled, just return immediately
-		return
-	}
-
-	// determine the full namespaced name of the managed resource
-	var namespacedName string
-	namespace := managed.GetNamespace()
-	if namespace != "" {
-		namespacedName = fmt.Sprintf("%s/%s", namespace, managed.GetName())
-	} else {
-		namespacedName = managed.GetName()
-	}
-
-	// get an error message from the error if it exists
-	var changeErrMessage *string
-	if changeErr != nil {
-		changeErrMessage = reference.ToPtrValue(changeErr.Error())
-	}
-
-	gvk := managed.GetObjectKind().GroupVersionKind()
-
-	// send everything we've got to the change log service
-	cle := &changelogs.SendChangeLogRequest{
-		Entry: &changelogs.ChangeLogEntry{
-			Provider:          r.providerVersion,
-			ApiVersion:        gvk.GroupVersion().String(),
-			Kind:              gvk.Kind,
-			Name:              namespacedName,
-			ExternalName:      meta.GetExternalName(managed),
-			Operation:         opType,
-			Snapshot:          snapshot,
-			ErrorMessage:      changeErrMessage,
-			AdditionalDetails: ad,
-		},
-	}
-
-	clr, err := r.changeLogClient.SendChangeLog(ctx, cle)
-	if err != nil {
-		log.Debug("Cannot send change log entry", "error", err)
-		record.Event(managed, event.Warning(reasonCannotSendChangeLog, err))
-		return
-	}
-
-	log.Debug("Sent change log entry", "changeLogResponse", clr)
-}
-
-// takeChangeLogSnapshot attempts to take a snapshot of the given managed
-// resource by converting it to a Struct that will be sent to the change logs
-// after an external operation is performed, if the change logs feature is
-// enabled. If there is an error during this process, an event will be recorded
-// and a nil snapshot will be returned.
-func (r *Reconciler) takeChangeLogSnapshot(managed resource.Managed, log logging.Logger, record event.Recorder) *structpb.Struct {
-	if !r.features.Enabled(feature.EnableAlphaChangeLogs) {
-		// change log feature isn't enabled, just return immediately
-		return nil
-	}
-
-	// capture the full state of the managed resource from before we performed the change
-	snapshot, err := resource.AsProtobufStruct(managed)
-	if err != nil {
-		log.Debug("Cannot snapshot managed resource", "error", err)
-		record.Event(managed, event.Warning(reasonCannotSendChangeLog, err))
-		return nil
-	}
-
-	return snapshot
 }
