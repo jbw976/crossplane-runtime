@@ -32,7 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	changelogs "github.com/crossplane/crossplane-runtime/apis/changelogs/proto/v1alpha1"
+	"github.com/crossplane/crossplane-runtime/apis/changelogs/proto/v1alpha1"
 	xpv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
 	"github.com/crossplane/crossplane-runtime/pkg/errors"
 	"github.com/crossplane/crossplane-runtime/pkg/meta"
@@ -2330,7 +2330,7 @@ func TestReconcilerChangeLogs(t *testing.T) {
 
 	type want struct {
 		callCount  int
-		opType     changelogs.OperationType
+		opType     v1alpha1.OperationType
 		errMessage string
 	}
 
@@ -2342,42 +2342,6 @@ func TestReconcilerChangeLogs(t *testing.T) {
 		args   args
 		want   want
 	}{
-		"CreateSuccessfulWithoutChangeLogs": {
-			reason: "Successful managed resource creation should not send a create change log entry when change logs are not enabled.",
-			args: args{
-				m: &fake.Manager{
-					Client: &test.MockClient{
-						MockGet:          test.NewMockGetFn(nil),
-						MockUpdate:       test.NewMockUpdateFn(nil),
-						MockStatusUpdate: test.MockSubResourceUpdateFn(func(_ context.Context, _ client.Object, _ ...client.SubResourceUpdateOption) error { return nil }),
-					},
-					Scheme: fake.SchemeWith(&fake.Managed{}),
-				},
-				mg: resource.ManagedKind(fake.GVK(&fake.Managed{})),
-				o: []ReconcilerOption{
-					WithExternalConnecter(ExternalConnectorFn(func(_ context.Context, _ resource.Managed) (ExternalClient, error) {
-						c := &ExternalClientFns{
-							ObserveFn: func(_ context.Context, _ resource.Managed) (ExternalObservation, error) {
-								// resource doesn't exist, which should trigger a create operation
-								return ExternalObservation{ResourceExists: false, ResourceUpToDate: false}, nil
-							},
-							CreateFn: func(_ context.Context, _ resource.Managed) (ExternalCreation, error) {
-								return ExternalCreation{}, nil
-							},
-							DisconnectFn: func(_ context.Context) error {
-								return nil
-							},
-						}
-						return c, nil
-					})),
-				},
-				// disable change logs for this test case
-				c: &changeLogServiceClient{enable: false},
-			},
-			want: want{
-				callCount: 0, // no change logs should be sent
-			},
-		},
 		"CreateSuccessfulWithChangeLogs": {
 			reason: "Successful managed resource creation should send a create change log entry when change logs are enabled.",
 			args: args{
@@ -2407,11 +2371,11 @@ func TestReconcilerChangeLogs(t *testing.T) {
 						return c, nil
 					})),
 				},
-				c: &changeLogServiceClient{enable: true},
+				c: &changeLogServiceClient{},
 			},
 			want: want{
 				callCount:  1,
-				opType:     changelogs.OperationType_OPERATION_TYPE_CREATE,
+				opType:     v1alpha1.OperationType_OPERATION_TYPE_CREATE,
 				errMessage: "",
 			},
 		},
@@ -2445,11 +2409,11 @@ func TestReconcilerChangeLogs(t *testing.T) {
 						return c, nil
 					})),
 				},
-				c: &changeLogServiceClient{enable: true},
+				c: &changeLogServiceClient{},
 			},
 			want: want{
 				callCount:  1,
-				opType:     changelogs.OperationType_OPERATION_TYPE_CREATE,
+				opType:     v1alpha1.OperationType_OPERATION_TYPE_CREATE,
 				errMessage: errBoom.Error(),
 			},
 		},
@@ -2482,11 +2446,11 @@ func TestReconcilerChangeLogs(t *testing.T) {
 						return c, nil
 					})),
 				},
-				c: &changeLogServiceClient{enable: true},
+				c: &changeLogServiceClient{},
 			},
 			want: want{
 				callCount:  1,
-				opType:     changelogs.OperationType_OPERATION_TYPE_UPDATE,
+				opType:     v1alpha1.OperationType_OPERATION_TYPE_UPDATE,
 				errMessage: "",
 			},
 		},
@@ -2520,11 +2484,11 @@ func TestReconcilerChangeLogs(t *testing.T) {
 						return c, nil
 					})),
 				},
-				c: &changeLogServiceClient{enable: true},
+				c: &changeLogServiceClient{},
 			},
 			want: want{
 				callCount:  1,
-				opType:     changelogs.OperationType_OPERATION_TYPE_UPDATE,
+				opType:     v1alpha1.OperationType_OPERATION_TYPE_UPDATE,
 				errMessage: errBoom.Error(),
 			},
 		},
@@ -2563,11 +2527,11 @@ func TestReconcilerChangeLogs(t *testing.T) {
 						return c, nil
 					})),
 				},
-				c: &changeLogServiceClient{enable: true},
+				c: &changeLogServiceClient{},
 			},
 			want: want{
 				callCount:  1,
-				opType:     changelogs.OperationType_OPERATION_TYPE_DELETE,
+				opType:     v1alpha1.OperationType_OPERATION_TYPE_DELETE,
 				errMessage: "",
 			},
 		},
@@ -2607,11 +2571,11 @@ func TestReconcilerChangeLogs(t *testing.T) {
 						return c, nil
 					})),
 				},
-				c: &changeLogServiceClient{enable: true},
+				c: &changeLogServiceClient{},
 			},
 			want: want{
 				callCount:  1,
-				opType:     changelogs.OperationType_OPERATION_TYPE_DELETE,
+				opType:     v1alpha1.OperationType_OPERATION_TYPE_DELETE,
 				errMessage: errBoom.Error(),
 			},
 		},
@@ -2619,10 +2583,7 @@ func TestReconcilerChangeLogs(t *testing.T) {
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			if tc.args.c.enable {
-				// enable change logs with the given test client
-				tc.args.o = append(tc.args.o, WithChangeLogs(tc.args.c, "provider-cool:v9.99.999"))
-			}
+			tc.args.o = append(tc.args.o, WithChangeLogger(NewGRPCChangeLogger(tc.args.c, "provider-cool:v9.99.999")))
 			r := NewReconciler(tc.args.m, tc.args.mg, tc.args.o...)
 			r.Reconcile(context.Background(), reconcile.Request{})
 
@@ -2630,14 +2591,12 @@ func TestReconcilerChangeLogs(t *testing.T) {
 				t.Errorf("\nReason: %s\nr.Reconcile(...): -want callCount, +got callCount:\n%s", tc.reason, diff)
 			}
 
-			if tc.want.callCount > 0 {
-				if diff := cmp.Diff(tc.want.opType, tc.args.c.requests[0].GetEntry().GetOperation()); diff != "" {
-					t.Errorf("\nReason: %s\nr.Reconcile(...): -want opType, +got opType:\n%s", tc.reason, diff)
-				}
+			if diff := cmp.Diff(tc.want.opType, tc.args.c.requests[0].GetEntry().GetOperation()); diff != "" {
+				t.Errorf("\nReason: %s\nr.Reconcile(...): -want opType, +got opType:\n%s", tc.reason, diff)
+			}
 
-				if diff := cmp.Diff(tc.want.errMessage, tc.args.c.requests[0].GetEntry().GetErrorMessage()); diff != "" {
-					t.Errorf("\nReason: %s\nr.Reconcile(...): -want errMessage, +got errMessage:\n%s", tc.reason, diff)
-				}
+			if diff := cmp.Diff(tc.want.errMessage, tc.args.c.requests[0].GetEntry().GetErrorMessage()); diff != "" {
+				t.Errorf("\nReason: %s\nr.Reconcile(...): -want errMessage, +got errMessage:\n%s", tc.reason, diff)
 			}
 		})
 	}

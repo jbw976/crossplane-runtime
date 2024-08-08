@@ -27,25 +27,23 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
-	changelogs "github.com/crossplane/crossplane-runtime/apis/changelogs/proto/v1alpha1"
+	"github.com/crossplane/crossplane-runtime/apis/changelogs/proto/v1alpha1"
 	"github.com/crossplane/crossplane-runtime/pkg/errors"
-	"github.com/crossplane/crossplane-runtime/pkg/event"
-	"github.com/crossplane/crossplane-runtime/pkg/logging"
 	"github.com/crossplane/crossplane-runtime/pkg/meta"
 	"github.com/crossplane/crossplane-runtime/pkg/reference"
 	"github.com/crossplane/crossplane-runtime/pkg/resource"
 	"github.com/crossplane/crossplane-runtime/pkg/resource/fake"
+	"github.com/crossplane/crossplane-runtime/pkg/test"
 )
 
 // A mock implementation of the ChangeLogServiceClient interface to help with
 // testing and verifying change log entries.
 type changeLogServiceClient struct {
-	enable   bool
-	requests []*changelogs.SendChangeLogRequest
-	sendFn   func(ctx context.Context, in *changelogs.SendChangeLogRequest, opts ...grpc.CallOption) (*changelogs.SendChangeLogResponse, error)
+	requests []*v1alpha1.SendChangeLogRequest
+	sendFn   func(ctx context.Context, in *v1alpha1.SendChangeLogRequest, opts ...grpc.CallOption) (*v1alpha1.SendChangeLogResponse, error)
 }
 
-func (c *changeLogServiceClient) SendChangeLog(ctx context.Context, in *changelogs.SendChangeLogRequest, opts ...grpc.CallOption) (*changelogs.SendChangeLogResponse, error) {
+func (c *changeLogServiceClient) SendChangeLog(ctx context.Context, in *v1alpha1.SendChangeLogRequest, opts ...grpc.CallOption) (*v1alpha1.SendChangeLogResponse, error) {
 	c.requests = append(c.requests, in)
 	if c.sendFn != nil {
 		return c.sendFn(ctx, in, opts...)
@@ -62,8 +60,8 @@ func TestChangeLogger(t *testing.T) {
 	}
 
 	type want struct {
-		requests []*changelogs.SendChangeLogRequest
-		events   []event.Event
+		requests []*v1alpha1.SendChangeLogRequest
+		err      error
 	}
 
 	errBoom := errors.New("boom")
@@ -73,18 +71,8 @@ func TestChangeLogger(t *testing.T) {
 		args   args
 		want   want
 	}{
-		"ChangeLogsNotEnabled": {
-			reason: "No change logs should be recorded when change logs are not enabled.",
-			args: args{
-				// disable change logs for this test case
-				c: &changeLogServiceClient{enable: false, requests: nil},
-			},
-			want: want{
-				requests: nil, // no change logs should be sent
-			},
-		},
-		"ChangeLogsEnabled": {
-			reason: "Change log entry should be recorded when change logs are enabled.",
+		"ChangeLogsSuccess": {
+			reason: "Change log entry should be recorded successfully.",
 			args: args{
 				mr: &fake.Managed{ObjectMeta: metav1.ObjectMeta{
 					Name:        "cool-managed",
@@ -92,19 +80,19 @@ func TestChangeLogger(t *testing.T) {
 				}},
 				err: errBoom,
 				ad:  AdditionalDetails{"key": "value", "key2": "value2"},
-				c:   &changeLogServiceClient{enable: true, requests: []*changelogs.SendChangeLogRequest{}},
+				c:   &changeLogServiceClient{requests: []*v1alpha1.SendChangeLogRequest{}},
 			},
 			want: want{
 				// a well fleshed out change log entry should be sent
-				requests: []*changelogs.SendChangeLogRequest{
+				requests: []*v1alpha1.SendChangeLogRequest{
 					{
-						Entry: &changelogs.ChangeLogEntry{
+						Entry: &v1alpha1.ChangeLogEntry{
 							Provider:     "provider-cool:v9.99.999",
 							ApiVersion:   (&fake.Managed{}).GetObjectKind().GroupVersionKind().GroupVersion().String(),
 							Kind:         (&fake.Managed{}).GetObjectKind().GroupVersionKind().Kind,
 							Name:         "cool-managed",
 							ExternalName: "cool-managed",
-							Operation:    changelogs.OperationType_OPERATION_TYPE_CREATE,
+							Operation:    v1alpha1.OperationType_OPERATION_TYPE_CREATE,
 							Snapshot: mustObjectAsProtobufStruct(&fake.Managed{ObjectMeta: metav1.ObjectMeta{
 								Name:        "cool-managed",
 								Annotations: map[string]string{meta.AnnotationKeyExternalName: "cool-managed"},
@@ -121,11 +109,10 @@ func TestChangeLogger(t *testing.T) {
 			args: args{
 				mr: &fake.Managed{},
 				c: &changeLogServiceClient{
-					enable:   true,
-					requests: []*changelogs.SendChangeLogRequest{},
+					requests: []*v1alpha1.SendChangeLogRequest{},
 					// make the send change log function return an error
-					sendFn: func(_ context.Context, _ *changelogs.SendChangeLogRequest, _ ...grpc.CallOption) (*changelogs.SendChangeLogResponse, error) {
-						return &changelogs.SendChangeLogResponse{}, errBoom
+					sendFn: func(_ context.Context, _ *v1alpha1.SendChangeLogRequest, _ ...grpc.CallOption) (*v1alpha1.SendChangeLogResponse, error) {
+						return &v1alpha1.SendChangeLogResponse{}, errBoom
 					},
 				},
 			},
@@ -133,9 +120,9 @@ func TestChangeLogger(t *testing.T) {
 				// we'll still see a change log entry, but it won't make it all
 				// the way to its destination and we should see an event for
 				// that failure
-				requests: []*changelogs.SendChangeLogRequest{
+				requests: []*v1alpha1.SendChangeLogRequest{
 					{
-						Entry: &changelogs.ChangeLogEntry{
+						Entry: &v1alpha1.ChangeLogEntry{
 							// we expect less fields to be set on the change log
 							// entry because we're not initializing the managed
 							// resource with much data in this simulated failure
@@ -143,70 +130,40 @@ func TestChangeLogger(t *testing.T) {
 							Provider:   "provider-cool:v9.99.999",
 							ApiVersion: (&fake.Managed{}).GetObjectKind().GroupVersionKind().GroupVersion().String(),
 							Kind:       (&fake.Managed{}).GetObjectKind().GroupVersionKind().Kind,
-							Operation:  changelogs.OperationType_OPERATION_TYPE_CREATE,
+							Operation:  v1alpha1.OperationType_OPERATION_TYPE_CREATE,
 							Snapshot:   mustObjectAsProtobufStruct(&fake.Managed{}),
 						},
 					},
 				},
-				events: []event.Event{
-					{
-						// we do expect an event to be recorded for the send failure
-						Type:        event.TypeWarning,
-						Reason:      reasonCannotSendChangeLog,
-						Message:     errBoom.Error(),
-						Annotations: map[string]string{},
-					},
-				},
+				err: errors.Wrap(errBoom, "Cannot send change log entry"),
 			},
 		},
 	}
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			logger := logging.NewNopLogger()
-			recorder := newMockRecorder()
-
-			// create the change logger given our test cases's inputs, then take
-			// a snapshot and record the change log entry
-			changeLogger := newChangeLogger(tc.args.c.enable, tc.args.c, logger, recorder, "provider-cool:v9.99.999")
-			changeLogger.takeSnapshot(tc.args.mr)
-			entry := changeLogger.newChangeLogEntry(tc.args.mr, changelogs.OperationType_OPERATION_TYPE_CREATE, tc.args.err, tc.args.ad)
-			changeLogger.recordChangeLog(context.Background(), tc.args.mr, entry)
+			changeLogger := NewGRPCChangeLogger(tc.args.c, "provider-cool:v9.99.999")
+			err := changeLogger.RecordChangeLog(context.Background(), tc.args.mr, v1alpha1.OperationType_OPERATION_TYPE_CREATE, tc.args.err, tc.args.ad)
 
 			// we ignore unexported fields in the protobuf related types, we
 			// don't care much for the internals that cmp doesn't handle
 			// well. The exported fields are good enough.
 			ignoreUnexported := cmpopts.IgnoreUnexported(
-				changelogs.SendChangeLogRequest{},
-				changelogs.ChangeLogEntry{},
+				v1alpha1.SendChangeLogRequest{},
+				v1alpha1.ChangeLogEntry{},
 				structpb.Struct{},
 				structpb.Value{})
 
 			if diff := cmp.Diff(tc.want.requests, tc.args.c.requests, ignoreUnexported); diff != "" {
-				t.Errorf("\nReason: %s\nr.recordChangeLog(...): -want requests, +got requests:\n%s", tc.reason, diff)
+				t.Errorf("\nReason: %s\nr.RecordChangeLog(...): -want requests, +got requests:\n%s", tc.reason, diff)
 			}
 
-			if diff := cmp.Diff(tc.want.events, recorder.events); diff != "" {
-				t.Errorf("\nReason: %s\nr.recordChangeLog(...): -want events, +got events:\n%s", tc.reason, diff)
+			if diff := cmp.Diff(tc.want.err, err, test.EquateErrors()); diff != "" {
+				t.Errorf("\nReason: %s\nr.RecordChangeLog(...): -want error, +got error:\n%s", tc.reason, diff)
 			}
 		})
 	}
 }
-
-// mockRecorder will record events seen during the test cases.
-type mockRecorder struct {
-	events []event.Event
-}
-
-func newMockRecorder() *mockRecorder {
-	return &mockRecorder{}
-}
-
-func (r *mockRecorder) Event(_ runtime.Object, e event.Event) {
-	r.events = append(r.events, e)
-}
-
-func (r *mockRecorder) WithAnnotations(_ ...string) event.Recorder { return r }
 
 func mustObjectAsProtobufStruct(o runtime.Object) *structpb.Struct {
 	s, err := resource.AsProtobufStruct(o)

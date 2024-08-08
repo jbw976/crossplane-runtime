@@ -18,112 +18,77 @@ package managed
 
 import (
 	"context"
-	"fmt"
 
-	changelogs "github.com/crossplane/crossplane-runtime/apis/changelogs/proto/v1alpha1"
-	"github.com/crossplane/crossplane-runtime/pkg/event"
-	"github.com/crossplane/crossplane-runtime/pkg/logging"
+	"github.com/crossplane/crossplane-runtime/apis/changelogs/proto/v1alpha1"
+	"github.com/crossplane/crossplane-runtime/pkg/errors"
 	"github.com/crossplane/crossplane-runtime/pkg/meta"
 	"github.com/crossplane/crossplane-runtime/pkg/reference"
 	"github.com/crossplane/crossplane-runtime/pkg/resource"
-	"google.golang.org/protobuf/types/known/structpb"
 )
 
-// changeLogger processes changes to resources and helps to send them to the
-// change log service
-type changeLogger struct {
-	enabled         bool
-	client          changelogs.ChangeLogServiceClient
-	providerVersion string
-	log             logging.Logger
-	record          event.Recorder
-	snapshot        *structpb.Struct
+// ChangeLogger is an interface for recording changes made to resources to the
+// change logs.
+type ChangeLogger interface {
+	RecordChangeLog(ctx context.Context, managed resource.Managed, opType v1alpha1.OperationType, changeErr error, ad AdditionalDetails) error
 }
 
-// newChangeLogger creates a new changeLogger initialized with the given values
-func newChangeLogger(enabled bool, client changelogs.ChangeLogServiceClient, log logging.Logger, record event.Recorder, providerVersion string) *changeLogger {
-	return &changeLogger{
-		enabled:         enabled,
+// GRPCChangeLogger processes changes to resources and helps to send them to the
+// change log gRPC service.
+type GRPCChangeLogger struct {
+	client          v1alpha1.ChangeLogServiceClient
+	providerVersion string
+}
+
+// NewGRPCChangeLogger creates a new gRPC based ChangeLogger initialized with
+// the given values.
+func NewGRPCChangeLogger(client v1alpha1.ChangeLogServiceClient, providerVersion string) *GRPCChangeLogger {
+	return &GRPCChangeLogger{
 		client:          client,
 		providerVersion: providerVersion,
-		log:             log,
-		record:          record,
 	}
 }
 
-// takeSnapshot attempts to take a snapshot of the given managed resource by
-// converting it to a Struct that will be sent to the change logs after an
-// external operation is performed, if the change logs feature is enabled. If
-// there is an error during this process, an event will be recorded and no
-// snapshot will be saved.
-func (c *changeLogger) takeSnapshot(managed resource.Managed) {
-	if !c.enabled {
-		// change log feature isn't enabled, just return immediately
-		return
-	}
-
-	// capture the full state of the managed resource from before we performed the change
-	snapshot, err := resource.AsProtobufStruct(managed)
-	if err != nil {
-		c.log.Debug("Cannot snapshot managed resource", "error", err)
-		c.record.Event(managed, event.Warning(reasonCannotSendChangeLog, err))
-		return
-	}
-
-	c.snapshot = snapshot
-}
-
-// newChangeLogEntry creates a new change log entry with the given values. If
-// change logs are not enabled then this function will return nil.
-func (c *changeLogger) newChangeLogEntry(managed resource.Managed, opType changelogs.OperationType, changeErr error, ad AdditionalDetails) *changelogs.ChangeLogEntry {
-	if !c.enabled {
-		// change log feature isn't enabled, just return immediately
-		return nil
-	}
-
-	// determine the full namespaced name of the managed resource
-	var namespacedName string
-	namespace := managed.GetNamespace()
-	if namespace != "" {
-		namespacedName = fmt.Sprintf("%s/%s", namespace, managed.GetName())
-	} else {
-		namespacedName = managed.GetName()
-	}
-
+// RecordChangeLog sends the given change log entry to the change log service.
+func (g *GRPCChangeLogger) RecordChangeLog(ctx context.Context, managed resource.Managed, opType v1alpha1.OperationType, changeErr error, ad AdditionalDetails) error {
 	// get an error message from the error if it exists
 	var changeErrMessage *string
 	if changeErr != nil {
 		changeErrMessage = reference.ToPtrValue(changeErr.Error())
 	}
 
+	// capture the full state of the managed resource from before we performed the change
+	snapshot, err := resource.AsProtobufStruct(managed)
+	if err != nil {
+		return errors.Wrap(err, "Cannot snapshot managed resource")
+	}
+
 	gvk := managed.GetObjectKind().GroupVersionKind()
 
-	return &changelogs.ChangeLogEntry{
-		Provider:          c.providerVersion,
+	entry := &v1alpha1.ChangeLogEntry{
+		Provider:          g.providerVersion,
 		ApiVersion:        gvk.GroupVersion().String(),
 		Kind:              gvk.Kind,
-		Name:              namespacedName,
+		Name:              managed.GetName(),
 		ExternalName:      meta.GetExternalName(managed),
 		Operation:         opType,
-		Snapshot:          c.snapshot,
+		Snapshot:          snapshot,
 		ErrorMessage:      changeErrMessage,
 		AdditionalDetails: ad,
 	}
-}
-
-// recordChangeLog sends the given change log entry to the change log service.
-func (c *changeLogger) recordChangeLog(ctx context.Context, managed resource.Managed, entry *changelogs.ChangeLogEntry) {
-	if !c.enabled {
-		// change log feature isn't enabled, just return immediately
-		return
-	}
 
 	// send everything we've got to the change log service
-	cle := &changelogs.SendChangeLogRequest{Entry: entry}
+	_, err = g.client.SendChangeLog(ctx, &v1alpha1.SendChangeLogRequest{Entry: entry})
+	return errors.Wrap(err, "Cannot send change log entry")
+}
 
-	_, err := c.client.SendChangeLog(ctx, cle)
-	if err != nil {
-		c.log.Debug("Cannot send change log entry", "error", err)
-		c.record.Event(managed, event.Warning(reasonCannotSendChangeLog, err))
-	}
+// nopChangeLogger does nothing for recording change logs, this is the default
+// implementation if a provider has not enabled the change logs feature.
+type nopChangeLogger struct{}
+
+func newNopChangeLogger() *nopChangeLogger {
+	return &nopChangeLogger{}
+}
+
+func (n *nopChangeLogger) RecordChangeLog(_ context.Context, _ resource.Managed, _ v1alpha1.OperationType, _ error, _ AdditionalDetails) error {
+	return nil
 }
