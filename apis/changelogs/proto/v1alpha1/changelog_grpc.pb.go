@@ -41,7 +41,7 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type ChangeLogServiceClient interface {
 	// SendChangeLog sends a change log entry to the change log service.
-	SendChangeLog(ctx context.Context, in *SendChangeLogRequest, opts ...grpc.CallOption) (*SendChangeLogResponse, error)
+	SendChangeLog(ctx context.Context, opts ...grpc.CallOption) (ChangeLogService_SendChangeLogClient, error)
 }
 
 type changeLogServiceClient struct {
@@ -52,13 +52,38 @@ func NewChangeLogServiceClient(cc grpc.ClientConnInterface) ChangeLogServiceClie
 	return &changeLogServiceClient{cc}
 }
 
-func (c *changeLogServiceClient) SendChangeLog(ctx context.Context, in *SendChangeLogRequest, opts ...grpc.CallOption) (*SendChangeLogResponse, error) {
-	out := new(SendChangeLogResponse)
-	err := c.cc.Invoke(ctx, ChangeLogService_SendChangeLog_FullMethodName, in, out, opts...)
+func (c *changeLogServiceClient) SendChangeLog(ctx context.Context, opts ...grpc.CallOption) (ChangeLogService_SendChangeLogClient, error) {
+	stream, err := c.cc.NewStream(ctx, &ChangeLogService_ServiceDesc.Streams[0], ChangeLogService_SendChangeLog_FullMethodName, opts...)
 	if err != nil {
 		return nil, err
 	}
-	return out, nil
+	x := &changeLogServiceSendChangeLogClient{stream}
+	return x, nil
+}
+
+type ChangeLogService_SendChangeLogClient interface {
+	Send(*SendChangeLogRequest) error
+	CloseAndRecv() (*SendChangeLogResponse, error)
+	grpc.ClientStream
+}
+
+type changeLogServiceSendChangeLogClient struct {
+	grpc.ClientStream
+}
+
+func (x *changeLogServiceSendChangeLogClient) Send(m *SendChangeLogRequest) error {
+	return x.ClientStream.SendMsg(m)
+}
+
+func (x *changeLogServiceSendChangeLogClient) CloseAndRecv() (*SendChangeLogResponse, error) {
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	m := new(SendChangeLogResponse)
+	if err := x.ClientStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
 }
 
 // ChangeLogServiceServer is the server API for ChangeLogService service.
@@ -66,7 +91,7 @@ func (c *changeLogServiceClient) SendChangeLog(ctx context.Context, in *SendChan
 // for forward compatibility
 type ChangeLogServiceServer interface {
 	// SendChangeLog sends a change log entry to the change log service.
-	SendChangeLog(context.Context, *SendChangeLogRequest) (*SendChangeLogResponse, error)
+	SendChangeLog(ChangeLogService_SendChangeLogServer) error
 	mustEmbedUnimplementedChangeLogServiceServer()
 }
 
@@ -74,8 +99,8 @@ type ChangeLogServiceServer interface {
 type UnimplementedChangeLogServiceServer struct {
 }
 
-func (UnimplementedChangeLogServiceServer) SendChangeLog(context.Context, *SendChangeLogRequest) (*SendChangeLogResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method SendChangeLog not implemented")
+func (UnimplementedChangeLogServiceServer) SendChangeLog(ChangeLogService_SendChangeLogServer) error {
+	return status.Errorf(codes.Unimplemented, "method SendChangeLog not implemented")
 }
 func (UnimplementedChangeLogServiceServer) mustEmbedUnimplementedChangeLogServiceServer() {}
 
@@ -90,22 +115,30 @@ func RegisterChangeLogServiceServer(s grpc.ServiceRegistrar, srv ChangeLogServic
 	s.RegisterService(&ChangeLogService_ServiceDesc, srv)
 }
 
-func _ChangeLogService_SendChangeLog_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(SendChangeLogRequest)
-	if err := dec(in); err != nil {
+func _ChangeLogService_SendChangeLog_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(ChangeLogServiceServer).SendChangeLog(&changeLogServiceSendChangeLogServer{stream})
+}
+
+type ChangeLogService_SendChangeLogServer interface {
+	SendAndClose(*SendChangeLogResponse) error
+	Recv() (*SendChangeLogRequest, error)
+	grpc.ServerStream
+}
+
+type changeLogServiceSendChangeLogServer struct {
+	grpc.ServerStream
+}
+
+func (x *changeLogServiceSendChangeLogServer) SendAndClose(m *SendChangeLogResponse) error {
+	return x.ServerStream.SendMsg(m)
+}
+
+func (x *changeLogServiceSendChangeLogServer) Recv() (*SendChangeLogRequest, error) {
+	m := new(SendChangeLogRequest)
+	if err := x.ServerStream.RecvMsg(m); err != nil {
 		return nil, err
 	}
-	if interceptor == nil {
-		return srv.(ChangeLogServiceServer).SendChangeLog(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: ChangeLogService_SendChangeLog_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ChangeLogServiceServer).SendChangeLog(ctx, req.(*SendChangeLogRequest))
-	}
-	return interceptor(ctx, in, info, handler)
+	return m, nil
 }
 
 // ChangeLogService_ServiceDesc is the grpc.ServiceDesc for ChangeLogService service.
@@ -114,12 +147,13 @@ func _ChangeLogService_SendChangeLog_Handler(srv interface{}, ctx context.Contex
 var ChangeLogService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "changelogs.proto.v1alpha1.ChangeLogService",
 	HandlerType: (*ChangeLogServiceServer)(nil),
-	Methods: []grpc.MethodDesc{
+	Methods:     []grpc.MethodDesc{},
+	Streams: []grpc.StreamDesc{
 		{
-			MethodName: "SendChangeLog",
-			Handler:    _ChangeLogService_SendChangeLog_Handler,
+			StreamName:    "SendChangeLog",
+			Handler:       _ChangeLogService_SendChangeLog_Handler,
+			ClientStreams: true,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
 	Metadata: "changelogs/proto/v1alpha1/changelog.proto",
 }

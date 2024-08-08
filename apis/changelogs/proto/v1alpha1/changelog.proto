@@ -24,7 +24,7 @@ option go_package = "github.com/crossplane/crossplane-runtime/apis/changelogs/pr
 // entries.
 service ChangeLogService {
   // SendChangeLog sends a change log entry to the change log service.
-  rpc SendChangeLog (SendChangeLogRequest) returns (SendChangeLogResponse) {}
+  rpc SendChangeLog (stream SendChangeLogRequest) returns (SendChangeLogResponse) {}
 }
 
 // SendChangeLogRequest represents a request to send a single change log entry.

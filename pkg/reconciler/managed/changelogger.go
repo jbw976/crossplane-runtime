@@ -35,13 +35,13 @@ type ChangeLogger interface {
 // GRPCChangeLogger processes changes to resources and helps to send them to the
 // change log gRPC service.
 type GRPCChangeLogger struct {
-	client          v1alpha1.ChangeLogServiceClient
+	client          v1alpha1.ChangeLogService_SendChangeLogClient
 	providerVersion string
 }
 
 // NewGRPCChangeLogger creates a new gRPC based ChangeLogger initialized with
 // the given values.
-func NewGRPCChangeLogger(client v1alpha1.ChangeLogServiceClient, providerVersion string) *GRPCChangeLogger {
+func NewGRPCChangeLogger(client v1alpha1.ChangeLogService_SendChangeLogClient, providerVersion string) *GRPCChangeLogger {
 	return &GRPCChangeLogger{
 		client:          client,
 		providerVersion: providerVersion,
@@ -77,7 +77,7 @@ func (g *GRPCChangeLogger) RecordChangeLog(ctx context.Context, managed resource
 	}
 
 	// send everything we've got to the change log service
-	_, err = g.client.SendChangeLog(ctx, &v1alpha1.SendChangeLogRequest{Entry: entry})
+	err = g.client.Send(&v1alpha1.SendChangeLogRequest{Entry: entry})
 	return errors.Wrap(err, "Cannot send change log entry")
 }
 
